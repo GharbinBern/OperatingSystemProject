@@ -1,9 +1,10 @@
 #include "input.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stdio.h> // for fgets, stdin
+#include <stdlib.h> //for malloc, NULL
+#include <string.h> //for strlen, strcpy
 
 char *read_input(void) {
+    // fixed local buffer to first capture the user input
     char buffer[MAX_INPUT_SIZE];
     
     // Read from stdin using fgets
@@ -12,7 +13,7 @@ char *read_input(void) {
         return NULL;
     }
     
-    // Remove trailing newline
+    // Remove trailing newline for easy comparison and parsing
     size_t len = strlen(buffer);
     if (len > 0 && buffer[len - 1] == '\n') {
         buffer[len - 1] = '\0';
