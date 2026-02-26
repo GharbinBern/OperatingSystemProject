@@ -10,7 +10,7 @@
 #define ERROR_REDIR '2'
 
 // Forward declarations
-static void tokenize_command(const char *cmd_str, Command *cmd);
+static int tokenize_command(const char *cmd_str, Command *cmd);
 static char *trim_whitespace(char *str);
 static int has_syntax_error(const char *input, char *error_msg);
 
@@ -91,8 +91,15 @@ Pipeline parse_input(const char *input) {
             cmd->output_file = NULL;
             cmd->error_file = NULL;
             
-            // Tokenize and parse the command
-            tokenize_command(trimmed, cmd);
+            // Tokenize and parse the command.
+            // IMPORTANT FIX: if tokenization fails (e.g., missing file after >, <, 2>),
+            // parse_input now returns command_count = -1 so execution will not run.
+            if (tokenize_command(trimmed, cmd) == -1) {
+                free(input_copy);
+                free_pipeline(&pipeline);
+                pipeline.command_count = -1;
+                return pipeline;
+            }
             
             // Check if command is empty after parsing
             if (cmd->argc == 0) {
@@ -113,13 +120,13 @@ Pipeline parse_input(const char *input) {
     return pipeline;
 }
 
-//Tokenizes a single command and extracts arguments and redirections.
- 
-static void tokenize_command(const char *cmd_str, Command *cmd) {
+// Tokenizes a single command and extracts arguments and redirections.
+// Returns 0 on success, -1 on parse/tokenization error.
+static int tokenize_command(const char *cmd_str, Command *cmd) {
     char *cmd_copy = malloc(strlen(cmd_str) + 1);
     if (cmd_copy == NULL) {
         perror("malloc");
-        return;
+        return -1;
     }
     strcpy(cmd_copy, cmd_str);
     
@@ -134,13 +141,13 @@ static void tokenize_command(const char *cmd_str, Command *cmd) {
             if (token == NULL) {
                 print_parse_error("Missing filename after '<'");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             cmd->input_file = malloc(strlen(token) + 1);
             if (cmd->input_file == NULL) {
                 perror("malloc");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             strcpy(cmd->input_file, token);
         } else if (strcmp(token, ">") == 0) {
@@ -149,19 +156,19 @@ static void tokenize_command(const char *cmd_str, Command *cmd) {
             if (token == NULL) {
                 print_parse_error("Missing filename after '>'");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             // Check if it's error redirection (2>)
             if (strlen(token) > 0 && token[0] == '2' && strlen(token) > 1 && token[1] == '>') {
                 print_parse_error("Invalid operator '2>' without space");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             cmd->output_file = malloc(strlen(token) + 1);
             if (cmd->output_file == NULL) {
                 perror("malloc");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             strcpy(cmd->output_file, token);
         } else if (strcmp(token, "2>") == 0) {
@@ -170,13 +177,13 @@ static void tokenize_command(const char *cmd_str, Command *cmd) {
             if (token == NULL) {
                 print_parse_error("Missing filename after '2>'");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             cmd->error_file = malloc(strlen(token) + 1);
             if (cmd->error_file == NULL) {
                 perror("malloc");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             strcpy(cmd->error_file, token);
         } else {
@@ -185,7 +192,7 @@ static void tokenize_command(const char *cmd_str, Command *cmd) {
             if (arg == NULL) {
                 perror("malloc");
                 free(cmd_copy);
-                return;
+                return -1;
             }
             strcpy(arg, token);
             cmd->args[cmd->argc] = arg;
@@ -199,10 +206,10 @@ static void tokenize_command(const char *cmd_str, Command *cmd) {
     cmd->args[cmd->argc] = NULL;
     
     free(cmd_copy);
+    return 0;
 }
 
-//Removes leading and trailing whitespace from a string.
-
+// Removes leading and trailing whitespace from a string.
 static char *trim_whitespace(char *str) {
     // Skip leading whitespace
     while (*str && isspace((unsigned char)*str)) {
@@ -223,8 +230,7 @@ static char *trim_whitespace(char *str) {
     return str;
 }
 
-//Checks for syntax errors in the input.
-
+// Checks for syntax errors in the input.
 static int has_syntax_error(const char *input, char *error_msg) {
     const char *ptr = input;
     

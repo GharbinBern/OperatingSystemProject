@@ -1,0 +1,20 @@
+# Build artifacts
+*.o
+*.out
+*.exe
+myshell/myshell
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files
+*.dSYM/
+*.su
+
+# Test files
+test.txt
