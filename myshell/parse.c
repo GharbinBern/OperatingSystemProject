@@ -12,6 +12,7 @@
 
 // Forward declarations
 static int tokenize_command(const char *cmd_str, Command *cmd);
+static char *next_token_quoted(const char **cursor, int *unmatched_quote);
 static char *trim_whitespace(char *str);
 static int has_syntax_error(const char *input, char *error_msg);
 
@@ -93,8 +94,8 @@ Pipeline parse_input(const char *input) {
             cmd->output_file = NULL;
             cmd->error_file = NULL;
             
-            // Tokenize and parse the command.
-            // if tokenization fails (missing file after >, <, 2>) return command_count = -1 so execution will not run.
+            // Tokenize and parse the command
+            // if tokenization fails (missing file after >, <, 2>) return command_count = -1 so execution will not run
             if (tokenize_command(trimmed, cmd) == -1) {
                 free(input_copy);
                 free_pipeline(&pipeline);
@@ -121,100 +122,256 @@ Pipeline parse_input(const char *input) {
     return pipeline;
 }
 
-// Tokenizes a single command and extracts arguments and redirections.
-// Returns 0 on success, -1 on parse/tokenization error.
+// Tokenizes a single command and extracts arguments and redirections
+// Returns 0 on success, -1 on parse/tokenization error
 static int tokenize_command(const char *cmd_str, Command *cmd) {
-    char *cmd_copy = malloc(strlen(cmd_str) + 1);
-    if (cmd_copy == NULL) {
-        perror("malloc");
-        return -1;
-    }
-    strcpy(cmd_copy, cmd_str);
-    
-    char *saveptr = NULL;
-    char *token = strtok_r(cmd_copy, " \t", &saveptr);
-    
+    const char *cursor = cmd_str;
+    int unmatched_quote = 0;
+    char *token = next_token_quoted(&cursor, &unmatched_quote);
+
     while (token != NULL && cmd->argc < MAX_ARGS - 1) {
         // Check for redirection operators
         if (strcmp(token, "<") == 0) {
             // Input redirection
-            token = strtok_r(NULL, " \t", &saveptr);
+            free(token);
+            token = next_token_quoted(&cursor, &unmatched_quote);
+            if (unmatched_quote) {
+                print_parse_error("Unmatched quote");
+                return -1;
+            }
             if (token == NULL) {
                 print_parse_error("Missing filename after '<'");
-                free(cmd_copy);
                 return -1;
             }
             cmd->input_file = malloc(strlen(token) + 1);
             // If allocation fails, report error and clean temporary memory
             if (cmd->input_file == NULL) {
                 perror("malloc");
-                free(cmd_copy);
+                free(token);
                 return -1;
             }
             strcpy(cmd->input_file, token);
+            free(token);
         } else if (strcmp(token, ">") == 0) {
             // Output redirection
-            token = strtok_r(NULL, " \t", &saveptr);
+            free(token);
+            token = next_token_quoted(&cursor, &unmatched_quote);
+            if (unmatched_quote) {
+                print_parse_error("Unmatched quote");
+                return -1;
+            }
             if (token == NULL) {
                 print_parse_error("Missing filename after '>'");
-                free(cmd_copy);
                 return -1;
             }
             // Check if it's error redirection (2>)
             if (strlen(token) > 0 && token[0] == '2' && strlen(token) > 1 && token[1] == '>') {
                 print_parse_error("Invalid operator '2>' without space");
-                free(cmd_copy);
+                free(token);
                 return -1;
             }
             cmd->output_file = malloc(strlen(token) + 1);
             // If allocation fails, report error and clean temporary memory
             if (cmd->output_file == NULL) {
                 perror("malloc");
-                free(cmd_copy);
+                free(token);
                 return -1; // abort parsing
             }
-            // Copy the filename token into the allocated buffer.
+            // Copy the filename token into the allocated buffer
             strcpy(cmd->output_file, token);
+            free(token);
         } else if (strcmp(token, "2>") == 0) {
             // Error redirection
-            token = strtok_r(NULL, " \t", &saveptr);
+            free(token);
+            token = next_token_quoted(&cursor, &unmatched_quote);
+            if (unmatched_quote) {
+                print_parse_error("Unmatched quote");
+                return -1;
+            }
             if (token == NULL) {
                 print_parse_error("Missing filename after '2>'");
-                free(cmd_copy);
                 return -1;
             }
             cmd->error_file = malloc(strlen(token) + 1);
             // If allocation fails, report error and clean temporary memory
             if (cmd->error_file == NULL) {
                 perror("malloc");
-                free(cmd_copy);
+                free(token);
                 return -1;
             }
             strcpy(cmd->error_file, token);
+            free(token);
         } else {
             // Regular argument
             char *arg = malloc(strlen(token) + 1);
             if (arg == NULL) {
                 perror("malloc");
-                free(cmd_copy);
+                free(token);
                 return -1;
             }
             strcpy(arg, token);
             cmd->args[cmd->argc] = arg;
             cmd->argc++;
+            free(token);
         }
-        
-        token = strtok_r(NULL, " \t", &saveptr);
+
+        token = next_token_quoted(&cursor, &unmatched_quote);
+        if (unmatched_quote) {
+            print_parse_error("Unmatched quote");
+            return -1;
+        }
     }
     
     // Null-terminate the argument array
     cmd->args[cmd->argc] = NULL;
     
-    free(cmd_copy);
+    free(token);
     return 0;
 }
 
-// Removes leading and trailing whitespace from a string.
+static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
+    
+    const char *ptr = *cursor; // Current read position in the command string
+    size_t max_len; // Maximum possible token size from current position
+    char *token;  // Write position in token buffer
+   
+    size_t out_idx = 0;
+    // Quote state flags while scanning one token
+    int in_single = 0;
+    int in_double = 0;
+
+    // Assume quote state is valid unless proven otherwise
+    *unmatched_quote = 0;
+
+    // Skip leading whitespace before the next token
+    while (*ptr && isspace((unsigned char)*ptr)) {
+        ptr++;
+    }
+
+    // no more tokens
+    if (*ptr == '\0') {
+        *cursor = ptr;
+        return NULL;
+    }
+
+    // return '<' or '>' as standalone redirection token
+    if (*ptr == '<' || *ptr == '>') {
+        token = malloc(2);
+        if (token == NULL) {
+            perror("malloc");
+            return NULL;
+        }
+        token[0] = *ptr;
+        token[1] = '\0';
+        *cursor = ptr + 1;
+        return token;
+    }
+
+    // return '2>' as standalone stderr redirection token
+    if (*ptr == '2' && *(ptr + 1) == '>') {
+        token = malloc(3);
+        if (token == NULL) {
+            perror("malloc");
+            return NULL;
+        }
+        token[0] = '2';
+        token[1] = '>';
+        token[2] = '\0';
+        *cursor = ptr + 2;
+        return token;
+    }
+
+    // allocate worst-case token size (remaining input length)
+    max_len = strlen(ptr);
+    token = malloc(max_len + 1);
+    if (token == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+
+    // build a token while respecting quotes and escapes
+    while (*ptr) {
+        if (!in_single && !in_double) {
+            // outside quotes, whitespace ends the token
+            if (isspace((unsigned char)*ptr)) {
+                break;
+            }
+            // outside quotes redirection starts a new token
+            if (*ptr == '<' || *ptr == '>') {
+                break;
+            }
+            if (*ptr == '2' && *(ptr + 1) == '>') {
+                break;
+            }
+            // outside quotes backslash escapes next character
+            if (*ptr == '\\') {
+                if (*(ptr + 1) != '\0') {
+                    token[out_idx++] = *(ptr + 1);
+                    ptr += 2;
+                } else {
+                    token[out_idx++] = *ptr;
+                    ptr++;
+                }
+                continue;
+            }
+            // Enter single-quoted mode (quote not copied)
+            if (*ptr == '\'') {
+                in_single = 1;
+                ptr++;
+                continue;
+            }
+            // Enter double-quoted mode (quote not copied)
+            if (*ptr == '"') {
+                in_double = 1;
+                ptr++;
+                continue;
+            }
+        } else if (in_single) {
+            // End single-quoted mode
+            if (*ptr == '\'') {
+                in_single = 0;
+                ptr++;
+                continue;
+            }
+        } else {
+            // In double quotes, allow backslash escaping
+            if (*ptr == '\\') {
+                if (*(ptr + 1) != '\0') {
+                    token[out_idx++] = *(ptr + 1);
+                    ptr += 2;
+                } else {
+                    token[out_idx++] = *ptr;
+                    ptr++;
+                }
+                continue;
+            }
+            // End double-quoted mode
+            if (*ptr == '"') {
+                in_double = 0;
+                ptr++;
+                continue;
+            }
+        }
+
+        // Copy ordinary character into token
+        token[out_idx++] = *ptr;
+        ptr++;
+    }
+
+    // If a quote was opened but not closed, report parse error
+    if (in_single || in_double) {
+        free(token);
+        *unmatched_quote = 1;
+        return NULL;
+    }
+
+    // Finalize token and advance cursor for next call
+    token[out_idx] = '\0';
+    *cursor = ptr;
+    return token;
+}
+
+// Removes leading and trailing whitespace from a string
 static char *trim_whitespace(char *str) {
     // Skip leading whitespace
     while (*str && isspace((unsigned char)*str)) {
@@ -235,7 +392,7 @@ static char *trim_whitespace(char *str) {
     return str;
 }
 
-// Checks for syntax errors in the input.
+// Checks for syntax errors in the input
 static int has_syntax_error(const char *input, char *error_msg) {
     const char *ptr = input;
     
