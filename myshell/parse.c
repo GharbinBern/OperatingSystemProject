@@ -2,8 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+#include <ctype.h> // for character helpers (isspace)
 
+// constants for pipr and redirection sym
 #define PIPE_CHAR '|'
 #define INPUT_REDIR '<'
 #define OUTPUT_REDIR '>'
@@ -14,6 +15,7 @@ static int tokenize_command(const char *cmd_str, Command *cmd);
 static char *trim_whitespace(char *str);
 static int has_syntax_error(const char *input, char *error_msg);
 
+// prints parser errors to stderr with "Error: ..." format
 void print_parse_error(const char *message) {
     fprintf(stderr, "Error: %s\n", message);
 }
@@ -22,20 +24,20 @@ Pipeline parse_input(const char *input) {
     Pipeline pipeline = {NULL, 0};
     char error_msg[256];
     
-    // Check for empty input
+    // check for empty input
     if (input == NULL || strlen(input) == 0) {
         pipeline.command_count = 0;
         return pipeline;
     }
     
-    // Check for syntax errors
+    // check for syntax errors
     if (has_syntax_error(input, error_msg)) {
         print_parse_error(error_msg);
         pipeline.command_count = -1;
         return pipeline;
     }
     
-    // Create a copy of input to avoid modifying the original
+    // create a copy of input to avoid modifying the original
     char *input_copy = malloc(strlen(input) + 1);
     if (input_copy == NULL) {
         perror("malloc");
@@ -44,11 +46,11 @@ Pipeline parse_input(const char *input) {
     }
     strcpy(input_copy, input);
     
-    // Split by pipes
+    // split by pipes
     char *pipe_saveptr = NULL;
     char *cmd_token = strtok_r(input_copy, "|", &pipe_saveptr);
     
-    // Count the number of commands
+    // count the number of commands
     int cmd_count = 0;
     while (cmd_token != NULL) {
         // Trim whitespace and check if command is empty
@@ -58,7 +60,7 @@ Pipeline parse_input(const char *input) {
         }
         cmd_token = strtok_r(NULL, "|", &pipe_saveptr);
     }
-    
+    //report for empty command
     if (cmd_count == 0) {
         print_parse_error("Empty command");
         free(input_copy);
@@ -66,7 +68,7 @@ Pipeline parse_input(const char *input) {
         return pipeline;
     }
     
-    // Allocate memory for commands
+    // allocate memory for commands
     pipeline.commands = malloc(cmd_count * sizeof(Command));
     if (pipeline.commands == NULL) {
         perror("malloc");
@@ -92,8 +94,7 @@ Pipeline parse_input(const char *input) {
             cmd->error_file = NULL;
             
             // Tokenize and parse the command.
-            // IMPORTANT FIX: if tokenization fails (e.g., missing file after >, <, 2>),
-            // parse_input now returns command_count = -1 so execution will not run.
+            // if tokenization fails (missing file after >, <, 2>) return command_count = -1 so execution will not run.
             if (tokenize_command(trimmed, cmd) == -1) {
                 free(input_copy);
                 free_pipeline(&pipeline);
@@ -144,6 +145,7 @@ static int tokenize_command(const char *cmd_str, Command *cmd) {
                 return -1;
             }
             cmd->input_file = malloc(strlen(token) + 1);
+            // If allocation fails, report error and clean temporary memory
             if (cmd->input_file == NULL) {
                 perror("malloc");
                 free(cmd_copy);
@@ -165,11 +167,13 @@ static int tokenize_command(const char *cmd_str, Command *cmd) {
                 return -1;
             }
             cmd->output_file = malloc(strlen(token) + 1);
+            // If allocation fails, report error and clean temporary memory
             if (cmd->output_file == NULL) {
                 perror("malloc");
                 free(cmd_copy);
-                return -1;
+                return -1; // abort parsing
             }
+            // Copy the filename token into the allocated buffer.
             strcpy(cmd->output_file, token);
         } else if (strcmp(token, "2>") == 0) {
             // Error redirection
@@ -180,6 +184,7 @@ static int tokenize_command(const char *cmd_str, Command *cmd) {
                 return -1;
             }
             cmd->error_file = malloc(strlen(token) + 1);
+            // If allocation fails, report error and clean temporary memory
             if (cmd->error_file == NULL) {
                 perror("malloc");
                 free(cmd_copy);
