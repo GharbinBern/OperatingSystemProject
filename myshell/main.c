@@ -53,7 +53,10 @@ int main(void) {
         }
         
         // Execute the pipeline (also executor handles its own error messages)
-        execute_pipeline(&pipeline);
+        int exec_status = execute_pipeline(&pipeline);
+        if (exec_status == -1) {
+            fprintf(stderr, "Error: Failed to execute command(s).\n");
+        }
         
         // Free the pipeline
         free_pipeline(&pipeline);

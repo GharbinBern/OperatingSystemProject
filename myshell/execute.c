@@ -152,12 +152,15 @@ int execute_pipeline(const Pipeline *pipeline) {
 
             // Apply <, >, and 2> redirections for this command.
             if (apply_redirections(cmd) < 0) {
+                // Print error and exit immediately if redirection fails
+                fprintf(stderr, "Error: Redirection failed for command: %s\n", cmd->args[0] ? cmd->args[0] : "(null)");
                 _exit(EXIT_FAILURE);
             }
 
             // Replace child process image with the target command.
             execvp(cmd->args[0], cmd->args);
-            perror(cmd->args[0]);
+            // If execvp fails, print error and exit immediately
+            fprintf(stderr, "Error: Command not found: %s\n", cmd->args[0] ? cmd->args[0] : "(null)");
             _exit(127);
         }
 
