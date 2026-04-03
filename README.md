@@ -1,16 +1,36 @@
-# MyShell - A Simple Unix Shell
+# MyShell - A Unix Shell with Remote Socket Support
 
-A simple Unix shell implementation in C that supports basic command execution, pipelines, and I/O redirection.
+A Unix shell implementation in C supporting command execution, pipelines, I/O redirection,
+and remote access via TCP socket communication.
 
 ## Features
 
-- **Command Execution**: Execute standard Unix commands
-- **Pipelines**: Chain multiple commands using pipes (`|`)
+- **Command Execution**: Execute standard Unix commands with arguments
+- **Pipelines**: Chain multiple commands using `|`
 - **Input Redirection**: Redirect input from files using `<`
 - **Output Redirection**: Redirect output to files using `>`
 - **Error Redirection**: Redirect stderr to files using `2>`
-- **Interactive Mode**: Read-eval-print loop with command prompt
+- **Quoted Arguments**: Single and double quote handling with backslash escaping
+- **Remote Shell**: Execute commands over a TCP socket connection (Phase 2)
 - **Exit Command**: Type `exit` or press Ctrl+D to quit
+
+---
+
+## Project Structure
+
+```
+myshell/
+├── main.c          — Phase 1 interactive shell entry point
+├── input.c/h       — User input reading module
+├── parse.c/h       — Command parser: tokenization, pipes, redirections
+├── execute.c/h     — Pipeline executor: fork, execvp, dup2, waitpid
+├── shell.c/h       — Phase 2 bridge: captures command output as a string
+├── server.c        — Phase 2 TCP server
+├── client.c        — Phase 2 TCP client
+└── Makefile        — Builds myshell, server, and client
+```
+
+---
 
 ## Building
 
@@ -19,70 +39,96 @@ cd myshell
 make
 ```
 
-## Usage
+This produces three executables: `myshell`, `server`, and `client`.
 
-Run the shell:
+To remove compiled files:
+
+```bash
+make clean
+```
+
+---
+
+## Phase 1 — Interactive Shell
+
+Run the local interactive shell:
+
 ```bash
 ./myshell
 ```
 
 ### Examples
 
-Basic command:
 ```bash
 $ ls -la
-```
-
-Pipeline:
-```bash
-$ ls | grep myshell
-```
-
-Output redirection:
-```bash
-$ echo "Hello World" > output.txt
-```
-
-Input redirection:
-```bash
-$ wc -l < input.txt
-```
-
-Error redirection:
-```bash
+$ echo "Hello World"
+$ ls | grep .c
+$ cat file.txt | grep pattern | wc -l
+$ ls > output.txt
+$ wc -w < input.txt
 $ ls nonexistent 2> error.log
 ```
 
-Complex pipeline:
+---
+
+## Phase 2 — Remote Shell via TCP Socket
+
+The server executes commands using the Phase 1 shell engine. The client connects to it,
+sends commands, and displays the output — identical to a local shell from the user's perspective.
+
+**Start the server** (Terminal 1):
+
 ```bash
-$ cat file.txt | grep pattern | sort | uniq
+./server
 ```
 
-## Project Structure
+**Start the client** (Terminal 2):
 
-- **main.c**: Main shell loop and command prompt
-- **input.c/h**: User input reading module
-- **parse.c/h**: Command parsing and pipeline construction
-- **execute.c/h**: Process creation, execution, and I/O redirection
-- **Makefile**: Build configuration
+```bash
+./client
+```
+
+Type commands at the `$` prompt. Type `exit` to disconnect.
+
+### Server Output Format
+
+```
+[INFO] Server started, waiting for client connections...
+[INFO] Client connected.
+[RECEIVED] Received command: "ls -l" from client.
+[EXECUTING] Executing command: "ls -l"
+[OUTPUT] Sending output to client:
+...
+
+[RECEIVED] Received command: "unknowncmd" from client.
+[EXECUTING] Executing command: "unknowncmd"
+[ERROR] Command not found: "unknowncmd"
+[OUTPUT] Sending error message to client: Error: Command not found: unknowncmd
+
+[INFO] Client disconnected.
+```
+
+---
 
 ## Implementation Details
 
-- Uses `fork()` and `execvp()` for process creation
-- Implements inter-process communication using `pipe()`
-- File descriptor manipulation with `dup2()` for redirections
-- Proper error handling and resource cleanup
-- Memory management with dynamic allocation
+- `fork()` and `execvp()` for process creation
+- `pipe()` and `dup2()` for inter-process communication and I/O redirection
+- `socket()`, `bind()`, `listen()`, `accept()`, `recv()`, `send()` for TCP communication
+- Phase 1 parser and executor reused unchanged in the Phase 2 server
+- Output capture via fork+pipe wrapper in `shell.c`
+- `SO_REUSEADDR` set on server socket for immediate restart after shutdown
 
 ## Limitations
 
 - Maximum input length: 1024 characters
 - Maximum arguments per command: 64
 - Maximum commands in pipeline: 32
-- No support for background processes (`&`)
-- No support for environment variable expansion
-- No support for command history
+- Server handles one client connection per session
+- No background process support (`&`)
+- No environment variable expansion or command history
 
-## Author
+## Authors
 
-Built as an Operating Systems course project.
+Bernard Gharbin (bg2696) and Bismark Buernortey Buer (bb3621)  
+Operating Systems — NYU Abu Dhabi
