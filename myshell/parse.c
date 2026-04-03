@@ -6,7 +6,7 @@
 #include <string.h>
 #include <ctype.h> // for character helpers (isspace)
 
-// constants for pipr and redirection sym
+// Constants for pipe and redirection operators
 #define PIPE_CHAR '|'
 #define INPUT_REDIR '<'
 #define OUTPUT_REDIR '>'
