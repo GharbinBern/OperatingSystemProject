@@ -8,3 +8,6 @@ myshell
 
 # macOS debug symbol bundles
 *.dSYM/
+err.txt
+input
+input.txt
