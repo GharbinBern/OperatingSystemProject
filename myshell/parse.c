@@ -34,6 +34,26 @@ static int tokenize_command(const char *cmd_str, Command *cmd);
 static char *next_token_quoted(const char **cursor, int *unmatched_quote);
 static char *trim_whitespace(char *str);
 static int has_syntax_error(const char *input, char *error_msg);
+static int find_pipe_positions(const char *input, int *positions, int max_pipes);
+
+/*
+ * Scans input and records the index of every '|' that is outside quotes.
+ * This prevents splitting on pipes inside quoted strings like grep "a|b" file.
+ * Returns the number of pipes found.
+ */
+static int find_pipe_positions(const char *input, int *positions, int max_pipes) {
+    int count = 0;
+    int in_single = 0, in_double = 0;
+    for (int i = 0; input[i]; i++) {
+        if (input[i] == '\'' && !in_double) in_single = !in_single;       // toggle single-quote mode
+        else if (input[i] == '"' && !in_single) in_double = !in_double;   // toggle double-quote mode
+        else if (input[i] == '|' && !in_single && !in_double) {            // real pipe outside quotes
+            if (count < max_pipes) positions[count] = i;
+            count++;
+        }
+    }
+    return count;
+}
 
 // Print a parser error message to stderr in a consistent format
 void print_parse_error(const char *message) {
@@ -70,83 +90,84 @@ Pipeline parse_input(const char *input) {
         return pipeline;
     }
 
-    // Make a copy of the input string for tokenization
-    char *input_copy = malloc(strlen(input) + 1);
-    if (input_copy == NULL) {
-        perror("malloc");
-        pipeline.command_count = -1;
-        return pipeline;
-    }
-    strcpy(input_copy, input);
+    // Find pipe positions using a quote-aware scanner so pipes inside
+    // quoted strings (e.g. grep "a|b" file) are not treated as separators.
+    int pipe_positions[MAX_ARGS];
+    int pipe_count = find_pipe_positions(input, pipe_positions, MAX_ARGS);
+    int segment_count = pipe_count + 1;
 
-    // First pass: count the number of non-empty commands separated by '|'
-    char *pipe_saveptr = NULL;
-    char *cmd_token = strtok_r(input_copy, "|", &pipe_saveptr);
+    // First pass: count non-empty command segments
     int cmd_count = 0;
-    while (cmd_token != NULL) {
-        char *trimmed = trim_whitespace(cmd_token);
-        if (strlen(trimmed) > 0) {
-            cmd_count++;
-        }
-        cmd_token = strtok_r(NULL, "|", &pipe_saveptr);
+    int seg_start = 0;
+    for (int p = 0; p < segment_count; p++) {
+        int seg_end = (p < pipe_count) ? pipe_positions[p] : (int)strlen(input);
+        int seg_len = seg_end - seg_start;
+        char *seg = malloc(seg_len + 1);
+        if (!seg) { perror("malloc"); pipeline.command_count = -1; return pipeline; }
+        strncpy(seg, input + seg_start, seg_len);
+        seg[seg_len] = '\0';
+        if (strlen(trim_whitespace(seg)) > 0) cmd_count++;
+        free(seg);
+        seg_start = seg_end + 1;
     }
-    // If no commands found, report error
     if (cmd_count == 0) {
         print_parse_error("Empty command");
-        free(input_copy);
         pipeline.command_count = -1;
         return pipeline;
     }
 
     // Allocate space for all commands in the pipeline
     pipeline.commands = malloc(cmd_count * sizeof(Command));
-    if (pipeline.commands == NULL) {
+    if (!pipeline.commands) {
         perror("malloc");
-        free(input_copy);
         pipeline.command_count = -1;
         return pipeline;
     }
 
-    // Second pass: tokenize and parse each command
-    strcpy(input_copy, input);
-    pipe_saveptr = NULL;
-    cmd_token = strtok_r(input_copy, "|", &pipe_saveptr);
+    // Second pass: tokenize and parse each non-empty segment into a Command
     int cmd_idx = 0;
-    while (cmd_token != NULL) {
-        char *trimmed = trim_whitespace(cmd_token);
+    seg_start = 0;
+    for (int p = 0; p < segment_count; p++) {
+        int seg_end = (p < pipe_count) ? pipe_positions[p] : (int)strlen(input);
+        int seg_len = seg_end - seg_start;
+        char *seg = malloc(seg_len + 1);
+        if (!seg) {
+            perror("malloc");
+            free_pipeline(&pipeline);
+            pipeline.command_count = -1;
+            return pipeline;
+        }
+        strncpy(seg, input + seg_start, seg_len);
+        seg[seg_len] = '\0';
+        char *trimmed = trim_whitespace(seg);
+
         if (strlen(trimmed) > 0) {
-            // Initialize command fields
             Command *cmd = &pipeline.commands[cmd_idx];
             cmd->argc = 0;
             cmd->input_file = NULL;
             cmd->output_file = NULL;
             cmd->error_file = NULL;
 
-            // Tokenize arguments and handle redirections
-            // If tokenization fails, abort parsing
             if (tokenize_command(trimmed, cmd) == -1) {
-                free(input_copy);
+                free(seg);
                 free_pipeline(&pipeline);
                 pipeline.command_count = -1;
                 return pipeline;
             }
-
-            // Check for empty command 
             if (cmd->argc == 0) {
                 print_parse_error("Empty command between pipes");
-                free(input_copy);
+                free(seg);
                 free_pipeline(&pipeline);
                 pipeline.command_count = -1;
                 return pipeline;
             }
-
             cmd_idx++;
         }
-        cmd_token = strtok_r(NULL, "|", &pipe_saveptr);
+        free(seg);
+        seg_start = seg_end + 1;
     }
 
     pipeline.command_count = cmd_count;
-    free(input_copy);
     return pipeline;
 }
 
@@ -238,15 +259,17 @@ static int tokenize_command(const char *cmd_str, Command *cmd) {
             }
             strcpy(cmd->error_file, token);
             free(token);
+
         } else {
-            // Regular argument
-            char *arg = malloc(strlen(token) + 1);
+            // Regular argument: copy token exactly as parsed, including all backslashes
+            size_t len = strlen(token);
+            char *arg = malloc(len + 1);
             if (arg == NULL) {
                 perror("malloc");
                 free(token);
                 return -1;
             }
-            strcpy(arg, token);
+            memcpy(arg, token, len + 1); // preserve all bytes, including backslashes
             cmd->args[cmd->argc] = arg;
             cmd->argc++;
             free(token);
@@ -337,6 +360,7 @@ static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
         return NULL;
     }
 
+
     // build a token while respecting quotes and escapes
     while (*ptr) {
         if (!in_single && !in_double) {
@@ -351,10 +375,16 @@ static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
             if (*ptr == '2' && *(ptr + 1) == '>') {
                 break;
             }
-            // outside quotes backslash escapes next character
+            // outside quotes: only collapse escapes for quotes and backslash itself
             if (*ptr == '\\') {
-                if (*(ptr + 1) != '\0') {
-                    token[out_idx++] = *(ptr + 1);
+                char next = *(ptr + 1);
+                if (next == '\'' || next == '"' || next == '\\') {
+                    token[out_idx++] = next;
+                    ptr += 2;
+                } else if (next != '\0') {
+                    // preserve the backslash for sequences like \n, \t, etc.
+                    token[out_idx++] = *ptr;
+                    token[out_idx++] = next;
                     ptr += 2;
                 } else {
                     token[out_idx++] = *ptr;
@@ -375,17 +405,28 @@ static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
                 continue;
             }
         } else if (in_single) {
-            // End single-quoted mode
+            // In single quotes, everything is literal except the closing quote
             if (*ptr == '\'') {
                 in_single = 0;
                 ptr++;
                 continue;
             }
-        } else {
-            // In double quotes, allow backslash escaping
+            // Copy everything inside single quotes
+            token[out_idx++] = *ptr;
+            ptr++;
+            continue;
+        } else if (in_double) {
+            // In double quotes, only collapse escapes for double-quote and backslash itself.
+            // Per POSIX, \' inside double quotes is NOT special — both \ and ' must be kept.
             if (*ptr == '\\') {
-                if (*(ptr + 1) != '\0') {
-                    token[out_idx++] = *(ptr + 1);
+                char next = *(ptr + 1);
+                if (next == '"' || next == '\\') {
+                    token[out_idx++] = next;
+                    ptr += 2;
+                } else if (next != '\0') {
+                    // preserve the backslash for sequences like \n, \t, etc.
+                    token[out_idx++] = *ptr;
+                    token[out_idx++] = next;
                     ptr += 2;
                 } else {
                     token[out_idx++] = *ptr;
@@ -399,6 +440,10 @@ static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
                 ptr++;
                 continue;
             }
+            // Copy everything inside double quotes
+            token[out_idx++] = *ptr;
+            ptr++;
+            continue;
         }
 
         // Copy ordinary character into token
@@ -460,12 +505,17 @@ static char *trim_whitespace(char *str) {
  */
 static int has_syntax_error(const char *input, char *error_msg) {
     const char *ptr = input;
-    
+
     while (*ptr) {
-        // Check for pipe at the beginning
-        if (*ptr == '|' && ptr == input) {
-            strcpy(error_msg, "Pipe cannot be at the beginning");
-            return 1;
+        // Check for pipe at the beginning (ignoring leading whitespace)
+        if (*ptr == '|') {
+            const char *before = input;
+            while (before < ptr && isspace((unsigned char)*before)) before++;
+            if (before == ptr) {
+                // Everything before this pipe is whitespace 
+                strcpy(error_msg, "Pipe cannot be at the beginning");
+                return 1;
+            }
         }
         
         // Check for double pipes or pipe with no command before

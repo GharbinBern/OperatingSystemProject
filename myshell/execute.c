@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -137,6 +138,7 @@ int execute_pipeline(const Pipeline *pipeline) {
             return -1;
         }
 
+
         if (child_pids[i] == 0) {
             // If there is input from a previous pipe, connect it to stdin.
             if (prev_read_fd != -1) {
@@ -165,14 +167,50 @@ int execute_pipeline(const Pipeline *pipeline) {
 
             // Apply <, >, and 2> redirections for this command.
             if (apply_redirections(cmd) < 0) {
-                // Print error and exit immediately if redirection fails
                 fprintf(stderr, "Error: Redirection failed for command: %s\n", cmd->args[0] ? cmd->args[0] : "(null)");
                 _exit(EXIT_FAILURE);
             }
 
+
+            // echo builtin handling
+            if (cmd->argc > 0 && strcmp(cmd->args[0], "echo") == 0) {
+                int interpret_escapes = 0; // Flag for -e
+                int start = 1; 
+                // Check for -e flag
+                if (cmd->argc > 1 && strcmp(cmd->args[1], "-e") == 0) {
+                    interpret_escapes = 1;
+                    start = 2;
+                }
+                // Loop through each argument after echo/-e
+                for (int j = start; j < cmd->argc; ++j) {
+                    if (j > start) printf(" "); 
+                    if (interpret_escapes) {
+                        // Print with escape interpretation
+                        for (char *p = cmd->args[j]; *p; ++p) {
+                            // If backslash, check next char for escape
+                            if (*p == '\\' && *(p+1)) {
+                                ++p;
+                                if (*p == 'n') putchar('\n'); // newline
+                                else if (*p == 't') putchar('\t'); // tab
+                                else if (*p == '\\') putchar('\\'); // backslash
+                                else putchar(*p);
+                            } else {
+                                putchar(*p); 
+                            }
+                        }
+                    } else {
+                       
+                        printf("%s", cmd->args[j]);
+                    }
+                }
+                printf("\n"); // Always end with newline
+                fflush(stdout);
+                _exit(0); // Exit child after builtin
+            }
+    
+
             // Replace child process image with the target command.
             execvp(cmd->args[0], cmd->args);
-            // If execvp fails, print error and exit immediately
             fprintf(stderr, "Error: Command not found: %s\n", cmd->args[0] ? cmd->args[0] : "(null)");
             _exit(127);
         }
