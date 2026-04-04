@@ -24,7 +24,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define PORT        8080
+#define PORT        3000
 #define BUFFER_SIZE 4096
 
 int main(void) {

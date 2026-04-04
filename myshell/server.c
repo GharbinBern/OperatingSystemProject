@@ -28,7 +28,7 @@
 #include <errno.h>
 #include "shell.h"
 
-#define PORT        8080
+#define PORT        3000
 #define BUFFER_SIZE 4096
 
 int main(void) {
@@ -110,11 +110,17 @@ int main(void) {
 
         if (!output || strstr(output, "Error:") != NULL) {
             // Command failed or produced an error message
-            const char *err = output ? output : "Error: Command not found\n";
+            const char *err = output ? output : "Command not found\n";
             printf("[ERROR] Command not found: \"%s\"\n", buffer);
             printf("[OUTPUT] Sending error message to client: %s", err);
             fflush(stdout);
             send(client_fd, err, strlen(err), 0);
+        } else if (strlen(output) == 0) {
+            // No output produced, send a newline to prevent client freeze
+            const char *no_output = "\n";
+            printf("[OUTPUT] Sending output to client:\n%s\n", no_output);
+            fflush(stdout);
+            send(client_fd, no_output, strlen(no_output), 0);
         } else {
             // Command succeeded — forward output to client
             printf("[OUTPUT] Sending output to client:\n%s\n", output);
@@ -123,6 +129,9 @@ int main(void) {
         }
 
         free(output);
+
+        // Print a blank line after each command for readability
+        printf("\n");
     }
 
     close(client_fd);

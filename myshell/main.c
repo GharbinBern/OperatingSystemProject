@@ -3,6 +3,7 @@
 #include <string.h>
 #include "input.h"
 #include "parse.h"
+#include "execute.h"
 
 /*
  * main.c 
