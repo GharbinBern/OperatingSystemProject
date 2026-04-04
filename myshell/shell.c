@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "shell.h"
 #include "parse.h"
 #include "execute.h"
