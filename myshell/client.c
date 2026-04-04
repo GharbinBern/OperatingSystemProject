@@ -1,9 +1,19 @@
+
 /*
- * client.c — Phase 2 Socket Shell Client
+ * This program implements a TCP client that connects to the shell server on 127.0.0.1:PORT.
+ * It presents a "$" prompt to the user, reads commands from stdin, sends them to the server,
+ * and prints the server's response. Typing "exit" closes the socket and exits cleanly.
  *
- * Connects to the server on 127.0.0.1:PORT, presents a "$" prompt,
- * sends each command to the server over TCP, and prints the response.
- * Typing "exit" closes the socket and quits cleanly.
+ * Main logic steps:
+ *   1. Create a TCP socket and connect to the server.
+ *   2. Enter a prompt loop:
+ *      - Print "$" prompt and read user input.
+ *      - If input is "exit", close the socket and exit.
+ *      - Ignore blank lines.
+ *      - Send the command to the server.
+ *      - Receive and print the server's response.
+ *      - Ensure prompt appears on a new line even if output lacks a newline.
+ *   3. Clean up and exit on EOF or server disconnect.
  */
 
 #include <stdio.h>
@@ -23,7 +33,7 @@ int main(void) {
     char send_buf[BUFFER_SIZE];
     char recv_buf[BUFFER_SIZE];
 
-    /* --- Step 1: Create socket and connect to server --- */
+    // 1: Create socket and connect to server
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
@@ -44,40 +54,40 @@ int main(void) {
         exit(EXIT_FAILURE);
     }
 
-    /* --- Step 2: Prompt loop --- */
+    // 2: Prompt loop 
     while (1) {
         printf("$ ");
         fflush(stdout);
 
         if (fgets(send_buf, BUFFER_SIZE, stdin) == NULL) {
-            /* EOF (Ctrl-D): exit gracefully */
+            // EOF (Ctrl-D): exit gracefully
             printf("\n");
             break;
         }
 
-        /* Strip trailing newline */
+        // Strip trailing newline
         size_t len = strlen(send_buf);
         if (len > 0 && send_buf[len - 1] == '\n') {
             send_buf[--len] = '\0';
         }
 
-        /* --- Step 4: Handle "exit" locally — close socket cleanly --- */
+        // Handle "exit", close socket cleanly 
         if (strcmp(send_buf, "exit") == 0) {
             break;
         }
 
-        /* Ignore blank lines */
+        // Ignore blank lines
         if (len == 0) {
             continue;
         }
 
-        /* Send command to server */
+        // Send command to server
         if (send(sock, send_buf, len, 0) < 0) {
             perror("send failed");
             break;
         }
 
-        /* --- Step 3: Receive and display the server's response --- */
+        // 3: Receive and display the server's response 
         int bytes = recv(sock, recv_buf, BUFFER_SIZE - 1, 0);
         if (bytes <= 0) {
             if (bytes == 0) {
@@ -91,7 +101,7 @@ int main(void) {
         recv_buf[bytes] = '\0';
         printf("%s", recv_buf);
 
-        /* Ensure the prompt appears on a fresh line even if output lacks '\n' */
+        // Ensure the prompt appears on a fresh line even if output lacks '\n'
         if (recv_buf[bytes - 1] != '\n') {
             printf("\n");
         }

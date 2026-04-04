@@ -1,3 +1,20 @@
+
+/*
+ * parse.c 
+ *
+ * This module is responsible for parsing a shell command line string into a structured Pipeline,
+ * which consists of one or more Command objects. It handles splitting by pipes, tokenizing arguments,
+ * and extracting input/output/error redirections. It also performs syntax validation and error reporting.
+ *
+ * The parser supports:
+ *   - Multiple commands separated by '|'
+ *   - Arguments with or without quotes
+ *   - Input (<), output (>), and error (2>) redirection
+ *   - Syntax error detection (unmatched quotes, misplaced pipes, missing filenames, etc.)
+ *
+ * All memory allocated for the pipeline and commands must be freed by calling free_pipeline().
+ */
+
 #define _POSIX_C_SOURCE 200809L
 
 #include "parse.h"
@@ -12,35 +29,48 @@
 #define OUTPUT_REDIR '>'
 #define ERROR_REDIR '2'
 
-// Forward declarations
+// Forward declarations for internal helper functions
 static int tokenize_command(const char *cmd_str, Command *cmd);
 static char *next_token_quoted(const char **cursor, int *unmatched_quote);
 static char *trim_whitespace(char *str);
 static int has_syntax_error(const char *input, char *error_msg);
 
-// prints parser errors to stderr with "Error: ..." format
+// Print a parser error message to stderr in a consistent format
 void print_parse_error(const char *message) {
     fprintf(stderr, "Error: %s\n", message);
 }
 
+
+/*
+ * Parses a shell input string into a Pipeline structure.
+ *
+ * This function splits the input by pipes, tokenizes each command, extracts arguments and redirections,
+ * and validates syntax. If parsing fails, command_count is set to -1 and an error is printed.
+ *
+ * Parameters:
+ *   input - The command line string to parse.
+ *
+ * Returns:
+ *   Pipeline struct with parsed commands. If parsing fails, command_count = -1.
+ */
 Pipeline parse_input(const char *input) {
     Pipeline pipeline = {NULL, 0};
     char error_msg[256];
-    
-    // check for empty input
+
+    // Check for empty input (treat as no commands)
     if (input == NULL || strlen(input) == 0) {
         pipeline.command_count = 0;
         return pipeline;
     }
-    
-    // check for syntax errors
+
+    // Check for syntax errors before parsing
     if (has_syntax_error(input, error_msg)) {
         print_parse_error(error_msg);
         pipeline.command_count = -1;
         return pipeline;
     }
-    
-    // create a copy of input to avoid modifying the original
+
+    // Make a copy of the input string for tokenization
     char *input_copy = malloc(strlen(input) + 1);
     if (input_copy == NULL) {
         perror("malloc");
@@ -48,30 +78,27 @@ Pipeline parse_input(const char *input) {
         return pipeline;
     }
     strcpy(input_copy, input);
-    
-    // split by pipes
+
+    // First pass: count the number of non-empty commands separated by '|'
     char *pipe_saveptr = NULL;
     char *cmd_token = strtok_r(input_copy, "|", &pipe_saveptr);
-    
-    // count the number of commands
     int cmd_count = 0;
     while (cmd_token != NULL) {
-        // Trim whitespace and check if command is empty
         char *trimmed = trim_whitespace(cmd_token);
         if (strlen(trimmed) > 0) {
             cmd_count++;
         }
         cmd_token = strtok_r(NULL, "|", &pipe_saveptr);
     }
-    //report for empty command
+    // If no commands found, report error
     if (cmd_count == 0) {
         print_parse_error("Empty command");
         free(input_copy);
         pipeline.command_count = -1;
         return pipeline;
     }
-    
-    // allocate memory for commands
+
+    // Allocate space for all commands in the pipeline
     pipeline.commands = malloc(cmd_count * sizeof(Command));
     if (pipeline.commands == NULL) {
         perror("malloc");
@@ -79,33 +106,32 @@ Pipeline parse_input(const char *input) {
         pipeline.command_count = -1;
         return pipeline;
     }
-    
-    // Re-parse to fill in the commands
+
+    // Second pass: tokenize and parse each command
     strcpy(input_copy, input);
     pipe_saveptr = NULL;
     cmd_token = strtok_r(input_copy, "|", &pipe_saveptr);
-    
     int cmd_idx = 0;
     while (cmd_token != NULL) {
         char *trimmed = trim_whitespace(cmd_token);
         if (strlen(trimmed) > 0) {
-            // Initialize command
+            // Initialize command fields
             Command *cmd = &pipeline.commands[cmd_idx];
             cmd->argc = 0;
             cmd->input_file = NULL;
             cmd->output_file = NULL;
             cmd->error_file = NULL;
-            
-            // Tokenize and parse the command
-            // if tokenization fails (missing file after >, <, 2>) return command_count = -1 so execution will not run
+
+            // Tokenize arguments and handle redirections
+            // If tokenization fails, abort parsing
             if (tokenize_command(trimmed, cmd) == -1) {
                 free(input_copy);
                 free_pipeline(&pipeline);
                 pipeline.command_count = -1;
                 return pipeline;
             }
-            
-            // Check if command is empty after parsing
+
+            // Check for empty command 
             if (cmd->argc == 0) {
                 print_parse_error("Empty command between pipes");
                 free(input_copy);
@@ -113,19 +139,28 @@ Pipeline parse_input(const char *input) {
                 pipeline.command_count = -1;
                 return pipeline;
             }
-            
+
             cmd_idx++;
         }
         cmd_token = strtok_r(NULL, "|", &pipe_saveptr);
     }
-    
+
     pipeline.command_count = cmd_count;
     free(input_copy);
     return pipeline;
 }
 
-// Tokenizes a single command and extracts arguments and redirections
-// Returns 0 on success, -1 on parse/tokenization error
+/*
+ * Tokenizes a single command string, extracting arguments and redirection files.
+ * Handles quoted arguments and validates redirection syntax.
+ *
+ * Parameters:
+ *   cmd_str - The command string to tokenize (no pipes)
+ *   cmd     - Pointer to Command struct to fill
+ *
+ * Returns:
+ *   0 on success, -1 on parse/tokenization error
+ */
 static int tokenize_command(const char *cmd_str, Command *cmd) {
     const char *cursor = cmd_str;
     int unmatched_quote = 0;
@@ -231,6 +266,17 @@ static int tokenize_command(const char *cmd_str, Command *cmd) {
     return 0;
 }
 
+/*
+ * Extracts the next token from the command string, handling quotes and escapes.
+ * Advances the cursor and sets unmatched_quote if a quote is left open.
+ *
+ * Parameters:
+ *   cursor         - Pointer to current position in command string (updated)
+ *   unmatched_quote- Set to 1 if a quote is left open, 0 otherwise
+ *
+ * Returns:
+ *   Heap-allocated token string, or NULL if no more tokens or error.
+ */
 static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
     
     const char *ptr = *cursor; // Current read position in the command string
@@ -373,7 +419,15 @@ static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
     return token;
 }
 
-// Removes leading and trailing whitespace from a string
+/*
+ * Removes leading and trailing whitespace from a string (in place).
+ *
+ * Parameters:
+ *   str - The string to trim
+ *
+ * Returns:
+ *   Pointer to the trimmed string (may be advanced from original)
+ */
 static char *trim_whitespace(char *str) {
     // Skip leading whitespace
     while (*str && isspace((unsigned char)*str)) {
@@ -394,7 +448,16 @@ static char *trim_whitespace(char *str) {
     return str;
 }
 
-// Checks for syntax errors in the input
+/*
+ * Checks for basic syntax errors in the input string (pipes at ends, double pipes, etc).
+ *
+ * Parameters:
+ *   input     - The input string to check
+ *   error_msg - Buffer to receive error message (if any)
+ *
+ * Returns:
+ *   1 if a syntax error is found, 0 otherwise
+ */
 static int has_syntax_error(const char *input, char *error_msg) {
     const char *ptr = input;
     
@@ -427,6 +490,12 @@ static int has_syntax_error(const char *input, char *error_msg) {
     return 0;
 }
 
+/*
+ * Frees all memory allocated for a Pipeline and its contained commands.
+ *
+ * Parameters:
+ *   pipeline - Pointer to Pipeline to free
+ */
 void free_pipeline(Pipeline *pipeline) {
     if (pipeline == NULL || pipeline->commands == NULL) {
         return;

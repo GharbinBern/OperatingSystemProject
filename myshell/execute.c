@@ -9,8 +9,13 @@
 #include <unistd.h>
 
 /*
-  Applies file redirections for a single command.
-  Returns 0 on success, -1 on failure.
+ * Applies file redirections for a single command.
+ *
+ * This function checks if the command specifies input (<), output (>), or error (2>) redirection.
+ * For each redirection, it opens the target file and uses dup2() to redirect the appropriate
+ * standard file descriptor (STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO) to the file.
+ *
+ * Returns 0 on success, -1 on failure (with error printed to stderr).
  */
 static int apply_redirections(const Command *cmd) {
     int fd;
@@ -64,8 +69,16 @@ static int apply_redirections(const Command *cmd) {
 }
 
 /*
-   Executes all commands in a parsed pipeline.
-   Supports single commands, redirections, and multiple pipes.
+ * Executes all commands in a parsed pipeline.
+ *
+ * This function supports:
+ *   - Single commands and pipelines (multiple commands separated by '|')
+ *   - Input/output/error redirection for each command
+ *   - Forking a child process for each command in the pipeline
+ *   - Setting up pipes between commands for inter-process communication
+ *   - Waiting for all child processes to finish
+ *
+ * Returns 0 on success (all processes created and waited for), -1 on internal errors.
  */
 int execute_pipeline(const Pipeline *pipeline) {
     int prev_read_fd = -1;

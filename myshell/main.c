@@ -3,65 +3,81 @@
 #include <string.h>
 #include "input.h"
 #include "parse.h"
-#include "execute.h"
+
+/*
+ * main.c 
+ *
+ * This is the entry point for the interactive shell. It repeatedly prompts the user for input,
+ * parses the input into a pipeline of commands, and executes them. It handles built-in commands
+ * (like "exit"), empty input, and error reporting. All resources are properly freed after each command.
+ *
+ * Main logic steps:
+ *   1. Print the "$" prompt and flush stdout to ensure prompt visibility.
+ *   2. Read a line of input from the user (dynamically allocated).
+ *   3. If EOF (Ctrl+D), print a newline and exit.
+ *   4. If the input is "exit", free memory and exit.
+ *   5. Skip empty input lines.
+ *   6. Parse the input into a Pipeline structure (using parse_input()).
+ *   7. If parsing fails, print error and continue.
+ *   8. If no commands, continue.
+ *   9. Execute the pipeline (using execute_pipeline()).
+ *  10. Free all resources (pipeline and input string) before next iteration.
+ */
 
 int main(void) {
-    char *input; //to hold dynamically read command line
-    Pipeline pipeline; //struct to hold parsed commands
-    
+    char *input; // Dynamically allocated command line input
+    Pipeline pipeline; // Parsed pipeline of commands
+
     while (1) {
-        // loop to (prompt > read > parse > execute)
-        // print the prompt
+        // Print prompt and flush to ensure it appears immediately
         printf("$ ");
-        fflush(stdout); //to force prompt to appear immediately
-        
-        // Read input
+        fflush(stdout);
+
+        // Read input from user
         input = read_input();
-        
-        // check for EOF (Ctrl+D) and print newline and exit  
+
+        // Handle EOF (Ctrl+D): print newline and exit
         if (input == NULL) {
             printf("\n");
             break;
         }
-        
-        // check for exit command
+
+        // Handle built-in "exit" command
         if (strcmp(input, "exit") == 0) {
-            free(input); //frees memory
+            free(input);
             break;
         }
-        
-        // skip empty input
+
+        // Skip empty input lines
         if (strlen(input) == 0) {
             free(input);
             continue;
         }
-        
-        // parse the input
+
+        // Parse input into a pipeline of commands
         pipeline = parse_input(input);
-        
-        // check for parsing errors
+
+        // If parsing failed, error already printed; skip execution
         if (pipeline.command_count == -1) {
-            // Error message already printed by parser
             free(input);
             continue;
         }
-        
-        // skip if no commands (empty input after trimming)
+
+        // If no commands (e.g., whitespace), skip
         if (pipeline.command_count == 0) {
             free(input);
             continue;
         }
-        
-        // Execute the pipeline (also executor handles its own error messages)
+
+        // Execute the parsed pipeline (handles pipes, redirections, etc.)
         int exec_status = execute_pipeline(&pipeline);
         if (exec_status == -1) {
             fprintf(stderr, "Error: Failed to execute command(s).\n");
         }
-        
-        // Free the pipeline
+
+        // Free all resources for this command
         free_pipeline(&pipeline);
         free(input);
     }
-    
     return 0;
 }

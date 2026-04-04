@@ -1,10 +1,21 @@
+
 /*
- * server.c — Phase 2 Socket Shell Server
+ * server.c 
  *
- * Listens on PORT for a single client connection. For each command
- * received it calls execute_command() (shell.c), logs the interaction
- * using the required [INFO/RECEIVED/EXECUTING/ERROR/OUTPUT] tags, and
- * sends the output back to the client.
+ * This program implements a TCP server that listens for a single client connection on a fixed port.
+ * For each command received from the client, it:
+ *   - Logs the interaction with [INFO], [RECEIVED], [EXECUTING], [ERROR], and [OUTPUT] tags.
+ *   - Calls execute_command() (from shell.c) to parse and execute the command, capturing all output.
+ *   - Sends the output (or error message) back to the client over the socket.
+ *
+ * The server handles only one client at a time and exits when the client disconnects.
+ *
+ * Main logic steps:
+ *   1. Create a TCP socket and set SO_REUSEADDR for quick restarts.
+ *   2. Bind to INADDR_ANY:PORT and listen for connections.
+ *   3. Accept a single client connection.
+ *   4. Enter a loop: receive command, log, execute, log, send output, repeat.
+ *   5. Clean up and exit when the client disconnects or an error occurs.
  */
 
 #include <stdio.h>
@@ -28,19 +39,19 @@ int main(void) {
     char buffer[BUFFER_SIZE];
     ssize_t bytes_read;
 
-    /* --- Step 1: Create the TCP socket --- */
+    // 1: Create the TCP socket 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    /* Allow immediate restart without "Address already in use" errors */
+    // Allow immediate restart without "Address already in use" errors 
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    /* --- Step 2: Bind to INADDR_ANY:PORT and start listening --- */
-    address.sin_family      = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port        = htons(PORT);
+    // 2: Bind to INADDR_ANY:PORT and start listening 
+    address.sin_family      = AF_INET;         // IPv4 addressing
+    address.sin_addr.s_addr = INADDR_ANY;      // Accept connections on any local interface
+    address.sin_port        = htons(PORT);     // Port in network byte order(big endian)
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
@@ -57,7 +68,7 @@ int main(void) {
     printf("[INFO] Server started, waiting for client connections...\n");
     fflush(stdout);
 
-    /* --- Step 3: Accept one client connection --- */
+    // 3: Accept one client connection 
     if ((client_fd = accept(server_fd, (struct sockaddr *)&address, &addrlen)) < 0) {
         perror("accept failed");
         close(server_fd);
@@ -67,12 +78,12 @@ int main(void) {
     printf("[INFO] Client connected.\n");
     fflush(stdout);
 
-    /* --- Step 4: Receive → execute → send loop --- */
+    // 4: Receive -> execute -> send loop
     while (1) {
         memset(buffer, 0, BUFFER_SIZE);
         bytes_read = recv(client_fd, buffer, BUFFER_SIZE - 1, 0);
 
-        /* Step 5: Handle client disconnect or recv error */
+        // 5: Handle client disconnect or recv error
         if (bytes_read <= 0) {
             if (bytes_read == 0) {
                 printf("[INFO] Client disconnected.\n");
@@ -84,7 +95,7 @@ int main(void) {
 
         buffer[bytes_read] = '\0';
 
-        /* Strip trailing newline sent by the client */
+        // Strip trailing newline sent by the client
         size_t len = strlen(buffer);
         if (len > 0 && buffer[len - 1] == '\n') {
             buffer[--len] = '\0';
@@ -94,18 +105,18 @@ int main(void) {
         printf("[EXECUTING] Executing command: \"%s\"\n", buffer);
         fflush(stdout);
 
-        /* Run the command through the Phase 1 parser/executor */
+        // Run the command through the parser/executor
         char *output = execute_command(buffer);
 
         if (!output || strstr(output, "Error:") != NULL) {
-            /* Command failed or produced an error message */
+            // Command failed or produced an error message
             const char *err = output ? output : "Error: Command not found\n";
             printf("[ERROR] Command not found: \"%s\"\n", buffer);
             printf("[OUTPUT] Sending error message to client: %s", err);
             fflush(stdout);
             send(client_fd, err, strlen(err), 0);
         } else {
-            /* Command succeeded — forward output to client */
+            // Command succeeded — forward output to client
             printf("[OUTPUT] Sending output to client:\n%s\n", output);
             fflush(stdout);
             send(client_fd, output, strlen(output), 0);
