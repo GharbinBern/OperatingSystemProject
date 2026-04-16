@@ -81,6 +81,12 @@ int main(void) {
             continue;
         }
 
+        // Ignore ANSI escape sequences (arrow keys, function keys...)
+        // fgets captures these as raw bytes since there is no readline support.
+        if (strchr(send_buf, '\033') != NULL) {
+            continue;
+        }
+
         // Send command to server
         if (send(sock, send_buf, len, 0) < 0) {
             perror("send failed");
