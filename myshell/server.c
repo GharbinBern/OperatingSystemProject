@@ -23,9 +23,10 @@
 // Protected by client_num_sem to avoid duplicate numbers.
 static int client_counter = 0;
 
-// Binary semaphore (initialized to 1) used as a mutex to protect
+// Named binary semaphore (initialized to 1) used as a mutex to protect
 // client_counter and thread_counter from concurrent increments.
-static sem_t client_num_sem;
+static sem_t *client_sem = NULL;
+static const char *CLIENT_SEM_NAME = "/client_sem";
 
 // Holds all information a thread needs about its assigned client.
 // Allocated on the heap in main() and freed by the thread before it exits.
@@ -178,10 +179,11 @@ int main(void) {
     struct sockaddr_in client_addr;
     socklen_t addrlen = sizeof(client_addr);
 
-    // Initialize the semaphore to 1 so it works as a binary mutex.
-    // Second argument 0 means it is shared between threads of this process.
-    if (sem_init(&client_num_sem, 0, 1) != 0) {
-        perror("sem_init failed");
+    // Open or create the named semaphore (initial value 1 for mutex behavior)
+    sem_unlink(CLIENT_SEM_NAME); // Ensure no leftover semaphore
+    client_sem = sem_open(CLIENT_SEM_NAME, O_CREAT | O_EXCL, 0600, 1);
+    if (client_sem == SEM_FAILED) {
+        perror("sem_open failed");
         exit(EXIT_FAILURE);
     }
 
@@ -234,10 +236,10 @@ int main(void) {
 
         // Increment counters inside the semaphore so no two clients share a number.
         int client_num, thread_num;
-        sem_wait(&client_num_sem);
+        sem_wait(client_sem);
         client_num  = ++client_counter;
         thread_num  = ++thread_counter;
-        sem_post(&client_num_sem);
+        sem_post(client_sem);
 
         // Allocate the client info struct on the heap. The thread will free it.
         client_info_t *client_info = malloc(sizeof(client_info_t));
@@ -266,6 +268,7 @@ int main(void) {
 
     // Unreachable during normal operation.
     close(server_fd);
-    sem_destroy(&client_num_sem);
+    sem_close(client_sem);
+    sem_unlink(CLIENT_SEM_NAME);
     return 0;
 }
