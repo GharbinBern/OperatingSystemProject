@@ -1,25 +1,17 @@
-/*
- * input.h
- *
- * Public interface for input.c. This module handles reading a single line
- * of user input from stdin for the Phase 1 interactive shell.
- */
+// input.h
+// Declares read_input(), which reads one line from stdin for the interactive shell.
 
 #ifndef INPUT_H
 #define INPUT_H
 
-#include <stddef.h> /* NULL, size_t */
+#include <stddef.h>
 
-/* Maximum number of characters read per input line, including the null terminator. */
+// Maximum number of characters per input line, including the null terminator.
 #define MAX_INPUT_SIZE 1024
 
-/*
- * read_input - read one line from stdin and return it as a heap-allocated string.
- *
- * Reads up to MAX_INPUT_SIZE characters. Strips the trailing newline if present.
- * Returns NULL on EOF (Ctrl-D) or if memory allocation fails.
- * The caller is responsible for calling free() on the returned string.
- */
+// Reads one line from stdin, strips the trailing newline, and returns a
+// heap-allocated string. Returns NULL on EOF or allocation failure.
+// The caller must free() the returned string.
 char *read_input(void);
 
 #endif /* INPUT_H */
