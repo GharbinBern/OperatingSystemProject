@@ -1,0 +1,15 @@
+# Compiled binaries
+server
+client
+myshell
+
+# Object files
+*.o
+
+# macOS debug symbol bundles
+*.dSYM/
+err.txt
+input
+input.txt
+
+.vscode/

@@ -15,6 +15,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include "shell.h"
+#include <fcntl.h>
 
 #define PORT        3000   // TCP port the server listens on
 #define BUFFER_SIZE 4096   // Maximum size of one incoming command
@@ -33,8 +34,8 @@ static const char *CLIENT_SEM_NAME = "/client_sem";
 typedef struct {
     int client_fd;                  // socket file descriptor for this client
     struct sockaddr_in client_addr; // client IP address and port
-    int client_num;                 // client sequence number (1, 2, 3 ...)
-    int thread_num;                 // thread sequence number (1, 2, 3 ...)
+    int client_num;                 // client sequence number 
+    int thread_num;                 // thread sequence number 
 } client_info_t;
 
 // Entry point for each per-client thread.
