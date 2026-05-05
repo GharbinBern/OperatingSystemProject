@@ -48,6 +48,9 @@ int main(void) {
         exit(EXIT_FAILURE);
     }
 
+    printf("Connected to a server\n");
+    fflush(stdout);
+
     // Prompt loop: runs until "exit", EOF, or a socket error.
     while (1) {
         // Print the prompt and flush so it appears before the user types.

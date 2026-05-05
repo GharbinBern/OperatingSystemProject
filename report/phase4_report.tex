@@ -1,0 +1,604 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{array}
+
+% ── Code listing style ────────────────────────────────────────────────────────
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{gray},
+    frame=single,
+    breaklines=true,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    xleftmargin=1.5em,
+    framexleftmargin=1.5em,
+    language=C
+}
+
+% ── Section formatting ────────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+\begin{document}
+
+% ── Title page ────────────────────────────────────────────────────────────────
+\begin{titlepage}
+    \centering
+    \vspace*{3cm}
+    {\LARGE\bfseries PROJECT PHASE 4 REPORT\par}
+    \vspace{0.5cm}
+    {\large Operating Systems\par}
+    {\large Phase 4 --- Process Scheduling: SRJF + Round-Robin\par}
+    \vspace{1cm}
+    {\large\textbf{Submission Date:} 5 May 2026\par}
+    \vspace{0.5cm}
+    {\large
+        \textbf{Bernard Gharbin} \quad NetID: bg2696\\[0.3em]
+        \textbf{Bismark Buernortey Buer} \quad NetID: bb3621
+    \par}
+\end{titlepage}
+
+% ── Table of contents ─────────────────────────────────────────────────────────
+\tableofcontents
+\newpage
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+% ═════════════════════════════════════════════════════════════════════════════
+
+In Phase 4, we extended the multithreaded TCP shell server from Phase 3 to include a
+full process scheduling subsystem. The server now simulates a single-CPU environment in
+which all client requests --- whether shell commands or programs --- compete for execution
+time on one dedicated scheduler thread. Rather than executing commands directly inside
+each client thread, client threads classify and enqueue requests; the scheduler thread
+selects among them using a combined Shortest-Remaining-Job-First (SRJF) and Round-Robin
+(RR) algorithm.
+
+The scheduler supports two classes of requests. Shell commands (e.g., \texttt{ls},
+\texttt{pwd}, \texttt{echo}) are assigned a burst time of $-1$, which guarantees they
+are always selected first and run atomically without preemption. Program commands
+(e.g., \texttt{./demo N}) are assigned a predicted burst time of $N$ seconds and are
+subject to time-slicing and preemption. A dedicated test program, \texttt{demo.c},
+simulates a process that runs for exactly $N$ seconds by printing one output line per
+second, enabling the scheduler to demonstrate its behaviour visually.
+
+All Phase 1, 2, and 3 functionality --- including argument parsing, pipelines,
+redirections, and concurrent client handling --- is preserved in full. Phase 4 adds
+three new files (\texttt{scheduler.h}, \texttt{scheduler.c}, \texttt{demo.c}) and
+modifies \texttt{server.c}, \texttt{client.c}, and the \texttt{Makefile} to integrate
+the scheduling layer.
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{Architecture and Design}
+% ═════════════════════════════════════════════════════════════════════════════
+
+The Phase 4 system retains the modular client-server design from previous phases and
+adds a scheduling layer that sits between the client threads and command execution.
+
+\subsection{File Structure}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{File} & \textbf{Description} \\
+\midrule
+\texttt{main.c}          & Phase 1 interactive shell entry point (unchanged) \\
+\texttt{input.c/h}       & Line reader for interactive shell (unchanged) \\
+\texttt{parse.c/h}       & Command parser: tokenisation, pipes, redirections (unchanged) \\
+\texttt{execute.c/h}     & Pipeline executor: fork, execvp, dup2, waitpid (unchanged) \\
+\texttt{shell.c/h}       & Output-capture bridge: wraps execute\_pipeline() as a string \\
+\texttt{client.c}        & TCP client: prints ``Connected to a server'' on connect, then prompt loop \\
+\texttt{server.c}        & Modified: classifies commands, enqueues tasks, spawns scheduler thread \\
+\texttt{scheduler.h}     & Phase 4: Task, TaskQueue, HistEntry types and public API \\
+\texttt{scheduler.c}     & Phase 4: full SRJF + RR scheduling implementation \\
+\texttt{demo.c}          & Phase 4: test program that loops N times, sleeping 1 s per iteration \\
+\texttt{Makefile}        & Updated: adds \texttt{demo} target, links scheduler.c into server \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Thread Model}
+
+The server runs three types of threads concurrently.
+
+\begin{itemize}
+    \item \textbf{Main thread} --- accepts incoming TCP connections and spawns one
+          client thread per connection, exactly as in Phase 3.
+    \item \textbf{Scheduler thread} --- runs \texttt{scheduler\_run()} in an infinite
+          loop. This is the single simulated CPU: it is the only thread that forks child
+          processes or calls \texttt{execute\_command()}. All other threads submit work
+          to it through the shared \texttt{TaskQueue}.
+    \item \textbf{Client threads} --- one per connected client. Each thread receives
+          a command string via \texttt{recv()}, classifies it, and calls
+          \texttt{scheduler\_add\_task()} to enqueue it. The thread then loops back to
+          \texttt{recv()} and waits for the next command. Because \texttt{client.c} is
+          synchronous (it waits for a response before prompting for the next command),
+          there is at most one pending task per client in the queue at any time.
+\end{itemize}
+
+\subsection{Server Log Format}
+
+The server produces a structured log on stdout that matches the format required by the
+specification. Verbose connection-detail lines are suppressed; only the scheduler-format
+lines are printed.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Log line} & \textbf{Meaning} \\
+\midrule
+\texttt{[N]<<< client connected}    & Client \textit{N} established a connection \\
+\texttt{[N]>>> command}             & Client \textit{N} sent \textit{command} \\
+\texttt{[N]--- created (burst)}     & Task created with the given burst time \\
+\texttt{[N]--- started (burst)}     & Task began its first execution slice \\
+\texttt{[N]--- running (remaining)} & Task resumed after a SIGSTOP \\
+\texttt{[N]--- waiting (remaining)} & Task preempted or quantum expired; requeued \\
+\texttt{[N]--- ended (0)}           & Program task completed \\
+\texttt{[N]<<< B bytes sent}        & \textit{B} bytes of output forwarded to client \\
+\texttt{0)-P\textit{n}-(\textit{t})\ldots} & Gantt summary printed when queue empties \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{System Flow}
+
+The flow of a single \texttt{./demo N} command through the system is as follows.
+
+\begin{enumerate}
+    \item The client prints \texttt{\$} and reads a command from the user.
+    \item The command is sent to the server via \texttt{send()}.
+    \item The client thread receives it with \texttt{recv()}, logs
+          \texttt{[N]>>> command}, and calls \texttt{classify\_command()} to determine
+          the burst time and type.
+    \item \texttt{scheduler\_add\_task()} is called. The task is inserted into the
+          \texttt{TaskQueue} and the scheduler thread is signalled via a condition
+          variable. If the new task is shorter than the currently running one,
+          \texttt{preempt\_flag} is set.
+    \item The scheduler thread wakes up, runs \texttt{select\_next\_task()} (SRJF with
+          FCFS tie-breaking), marks the task \texttt{TASK\_RUNNING}, and executes it for
+          one quantum slice via \texttt{run\_program\_slice()}.
+    \item When the slice ends (quantum expired, preemption, or completion), the task is
+          either re-enqueued (\texttt{TASK\_WAITING}) or marked done. On completion, the
+          scheduler reads accumulated output from the child's pipe and sends it to the
+          client socket directly.
+    \item The client receives the output and prompts for the next command.
+    \item When all tasks drain, the scheduler prints the Gantt-chart summary.
+\end{enumerate}
+
+\subsection{Key Design Decisions}
+
+\textbf{Single scheduler thread as simulated CPU.} Rather than running tasks inside
+client threads (as in Phase 3), all execution is delegated to one scheduler thread. This
+accurately simulates a single-CPU environment where only one process runs at a time, which
+is a core requirement of the phase.
+
+\textbf{SRJF with Round-Robin and variable quantum.} The scheduling algorithm is a
+selectively preemptive combination of Shortest-Remaining-Job-First and Round-Robin. The
+first-round quantum is 3 seconds (allowing short tasks to complete quickly) and all
+subsequent rounds use a 7-second quantum. The shorter first-round quantum prevents
+long-running processes from monopolising the CPU on their first execution.
+
+\textbf{Shell commands always have priority.} Shell commands are assigned
+\texttt{burst\_time = -1}. Since $-1$ is less than any positive remaining time, SRJF
+always selects shell commands before any program task, and they run atomically in one shot
+without ever being preempted.
+
+\textbf{Preemption via SIGSTOP / SIGCONT.} When a new program task arrives with a
+shorter remaining time than the running task, \texttt{preempt\_flag} is set. The
+scheduler's 200\,ms polling loop detects this and sends \texttt{SIGSTOP} to the child
+process. When the task is later selected again, \texttt{SIGCONT} resumes it from exactly
+where it stopped, preserving all loop state. This requires no cooperation from the child
+process itself.
+
+\textbf{Output capture via pipe surviving preemption.} The output pipe created for a
+program task before \texttt{fork()} is kept open across all SIGSTOP/SIGCONT cycles. The
+scheduler reads from it only after the child exits, at which point it drains all
+accumulated output and forwards it to the client in one \texttt{send()} call.
+
+\textbf{No-consecutive-same-task rule.} To prevent a task with the shortest remaining
+time from monopolising the CPU across consecutive rounds, the scheduler tracks the most
+recently executed task ID and excludes it from selection unless it is the only task
+remaining. This promotes fairness while still respecting SRJF ordering.
+
+\textbf{Client-disconnect cleanup.} When a client disconnects, \texttt{scheduler\_remove\_client()} is called. Waiting tasks are dropped immediately; a running task has its
+child killed with \texttt{SIGKILL} and is flagged as cancelled so the scheduler skips
+sending output on the now-closed socket.
+
+\textbf{Gantt-chart summary.} Each time a task finishes a slice, a \texttt{HistEntry}
+is appended to a linked list recording the client number and the elapsed time since
+the scheduler started. When the queue drains to zero, \texttt{scheduler\_print\_summary()}
+prints the complete scheduling history in the format
+\texttt{0)-P\textit{n}-(\textit{t})-P\textit{n}-(\textit{t})...}
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{Implementation Highlights}
+% ═════════════════════════════════════════════════════════════════════════════
+
+\subsection{scheduler.h --- Data Structures}
+
+Three central data structures drive the scheduler. The \texttt{Task} struct holds all
+information about one request: its unique ID, the client number and socket fd, the command
+string, burst and remaining times, round counter, child PID, and pipe file descriptor.
+The \texttt{TaskQueue} struct is the shared object accessed by all threads. It contains a
+fixed-size array of \texttt{Task} slots, a count of active tasks, a mutex and condition
+variable for synchronisation, and the Gantt-chart history list.
+
+\begin{lstlisting}[caption={Key fields of the Task struct}]
+typedef struct {
+    int       task_id;            // unique 1-based ID; 0 means empty slot
+    int       client_num;         // client that submitted this task
+    int       client_fd;          // socket fd for sending the response
+    char      command[BUFFER_SIZE];
+    int       burst_time;         // original burst (-1 = shell command)
+    int       remaining_time;     // decremented each slice
+    int       round;              // 1 = first round, 2+ = subsequent
+    int       is_shell_cmd;       // 1 = shell, 0 = program
+    pid_t     pid;                // child PID; -1 if not yet forked
+    int       pipe_read;          // read end of output-capture pipe
+    int       cancelled;          // set to 1 on client disconnect
+} Task;
+\end{lstlisting}
+
+\subsection{scheduler.c --- Core Scheduling Loop}
+
+The scheduler thread runs \texttt{scheduler\_run()} in a loop. It blocks on
+\texttt{pthread\_cond\_wait()} when the queue is empty. When a task is available, it
+calls \texttt{select\_next\_task()} to choose the best candidate.
+
+\begin{lstlisting}[caption={SRJF task selection with no-consecutive rule}]
+static int select_next_task(TaskQueue *q) {
+    int best_idx = -1, best_remaining = INT_MAX;
+    time_t best_arrival = 0;
+
+    // first pass: skip the last-run task if others exist
+    for (int i = 0; i < MAX_TASKS; i++) {
+        Task *t = &q->tasks[i];
+        if (t->task_id == 0 || t->state != TASK_WAITING) continue;
+        if (t->task_id == q->last_run_task_id && q->count > 1) continue;
+        if (t->remaining_time < best_remaining ||
+           (t->remaining_time == best_remaining &&
+            t->arrival_time   <  best_arrival)) {
+            best_remaining = t->remaining_time;
+            best_arrival   = t->arrival_time;
+            best_idx       = i;
+        }
+    }
+    // second pass: if every waiting task was the last-run one, select it anyway
+    if (best_idx == -1) {
+        for (int i = 0; i < MAX_TASKS; i++)
+            if (q->tasks[i].task_id != 0 &&
+                q->tasks[i].state == TASK_WAITING)
+                { best_idx = i; break; }
+    }
+    return best_idx;
+}
+\end{lstlisting}
+
+\subsection{scheduler.c --- Program Slice Execution}
+
+\texttt{run\_program\_slice()} forks the child process on its first execution and uses
+\texttt{SIGCONT} on subsequent ones. It then polls every 200\,ms until the quantum
+expires, the child exits, or \texttt{preempt\_flag} is detected.
+
+\begin{lstlisting}[caption={Polling loop inside run\_program\_slice()}]
+while (elapsed < quantum) {
+    struct timespec ts = { 0, SCH_POLL_MS * 1000000L };
+    nanosleep(&ts, NULL);
+    elapsed = (int)(time(NULL) - slice_start);
+
+    // check if child has exited
+    if (waitpid(t->pid, &status, WNOHANG) == t->pid) {
+        completed = 1; t->pid = -1; break;
+    }
+    // check for preemption request from a client thread
+    pthread_mutex_lock(&q->mutex);
+    int preempt = q->preempt_flag;
+    pthread_mutex_unlock(&q->mutex);
+    if (preempt) { kill(t->pid, SIGSTOP); break; }
+}
+// edge case: child may have exited exactly at quantum boundary
+if (!completed && t->pid > 0)
+    if (waitpid(t->pid, &status, WNOHANG) == t->pid)
+        { completed = 1; t->pid = -1; }
+
+t->remaining_time -= elapsed;
+if (t->remaining_time < 0) t->remaining_time = 0;
+\end{lstlisting}
+
+\subsection{server.c --- Command Classification}
+
+The modified \texttt{server.c} replaces the direct \texttt{execute\_command()} call with
+\texttt{classify\_command()} followed by \texttt{scheduler\_add\_task()}. Commands
+starting with \texttt{./} are treated as programs; the integer argument (e.g., the
+\texttt{N} in \texttt{./demo N}) is parsed as the burst time. All other commands are
+shell commands with \texttt{burst\_time = -1}.
+
+\begin{lstlisting}[caption={Command classification in server.c}]
+static void classify_command(const char *command,
+                              int *burst_out, int *is_shell_out) {
+    if (strncmp(command, "./", 2) == 0) {
+        *is_shell_out = 0;
+        *burst_out    = DEFAULT_BURST;  // fallback for unknown programs
+        const char *last_space = strrchr(command, ' ');
+        if (last_space != NULL && *(last_space + 1) != '\0') {
+            int n = atoi(last_space + 1);
+            if (n > 0) *burst_out = n;  // use N from "./demo N"
+        }
+    } else {
+        *is_shell_out = 1;
+        *burst_out    = -1;  // -1 means always schedule first, run atomically
+    }
+}
+\end{lstlisting}
+
+\subsection{demo.c --- Simulation Program}
+
+\texttt{demo.c} accepts a single integer argument $N$ and prints \texttt{Demo i/N} once
+per second for $i = 0, 1, \ldots, N$, sleeping one second between iterations. The total
+wall-clock execution time equals exactly $N$ seconds, matching the burst time value
+supplied to the scheduler. \texttt{fflush(stdout)} is called after each line so output
+reaches the pipe immediately; this is essential so that accumulated output is available
+when the scheduler reads it after the child exits.
+
+\begin{lstlisting}[caption={Core loop in demo.c}]
+for (int i = 0; i <= n; i++) {
+    printf("Demo %d/%d\n", i, n);
+    fflush(stdout);
+    if (i < n) sleep(1);
+}
+\end{lstlisting}
+
+\subsection{Synchronisation}
+
+The \texttt{TaskQueue} mutex protects all mutable state: the task array, the count,
+\texttt{preempt\_flag}, \texttt{last\_run\_task\_id}, and the Gantt history list.
+The condition variable \texttt{has\_task} is signalled by every call to
+\texttt{scheduler\_add\_task()} and is waited on by the scheduler thread when the queue
+is empty. The mutex is never held during blocking I/O (pipe reads or socket sends) to
+avoid starving other threads.
+
+\subsection{Error Handling}
+
+\begin{itemize}
+    \item \texttt{fork()} and \texttt{pipe()} failures in \texttt{fork\_program()} are
+          reported with \texttt{perror()} and the slice returns 0 (not completed), so
+          the task is re-enqueued rather than silently dropped.
+    \item If the task queue is full (\texttt{MAX\_TASKS = 100}), an error message is
+          sent directly to the client so it is not left waiting indefinitely.
+    \item Sending on a closed socket (client disconnect during execution) is prevented
+          by the \texttt{cancelled} flag set in \texttt{scheduler\_remove\_client()}.
+    \item \texttt{SIGKILL} is sent to any child process still alive when its client
+          disconnects, and \texttt{waitpid()} is called to reap the zombie.
+    \item The \texttt{SO\_REUSEADDR} socket option allows the server to restart and
+          rebind immediately without waiting for \texttt{TIME\_WAIT} to expire.
+    \item The named semaphore \texttt{/client\_sem} is unlinked at startup to avoid
+          failures from stale semaphores left by a previous crash.
+\end{itemize}
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{Execution Instructions}
+% ═════════════════════════════════════════════════════════════════════════════
+
+\begin{enumerate}
+    \item Upload all source files to the remote Linux server via FileZilla (SFTP).
+    \item Navigate to the project directory:
+\begin{lstlisting}[language=bash, numbers=none]
+cd ~/myshell
+\end{lstlisting}
+    \item Compile all targets:
+\begin{lstlisting}[language=bash, numbers=none]
+make clean && make
+\end{lstlisting}
+    This produces four executables: \texttt{myshell}, \texttt{server}, \texttt{client},
+    and \texttt{demo}.
+    \item Start the server in one terminal:
+\begin{lstlisting}[language=bash, numbers=none]
+./server
+\end{lstlisting}
+    The server prints \texttt{| Hello, Server Started |} and waits for connections.
+    \item Open additional terminals (one per client) and connect each:
+\begin{lstlisting}[language=bash, numbers=none]
+./client
+\end{lstlisting}
+    Each client prints \texttt{Connected to a server} on successful connection.
+    \item At the \texttt{\$} prompt, type any shell command or a program command:
+\begin{lstlisting}[language=bash, numbers=none]
+$ pwd
+$ ls
+$ ./demo 10
+\end{lstlisting}
+    \item To exit a client, type \texttt{exit}. The server cancels any pending tasks
+          for that client and closes the connection.
+    \item To remove compiled files:
+\begin{lstlisting}[language=bash, numbers=none]
+make clean
+\end{lstlisting}
+\end{enumerate}
+
+\noindent\textbf{Note:} If \texttt{make} fails with a semaphore-related linker error on
+the remote server, add \texttt{-lrt} to the server link line in the Makefile:
+\begin{lstlisting}[language=bash, numbers=none]
+$(CC) $(CFLAGS) -o $@ $^ -lpthread -lrt
+\end{lstlisting}
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{Testing}
+% ═════════════════════════════════════════════════════════════════════════════
+
+All three required test scenarios were performed on the remote Linux server with the server
+running in one terminal and one client terminal per connected client. The server log and
+client output windows were arranged in a 2$\times$2 grid for each screenshot.
+
+\subsection{Test Scenario 1 --- Three Concurrent Clients, Shell Commands Only}
+
+\textbf{Setup:} Three clients connected simultaneously. Each sent a single shell command:
+Client 1 sent \texttt{pwd}, Client 2 sent \texttt{ls}, Client 3 sent \texttt{echo hello}.
+
+\textbf{Expected behaviour:} Shell commands carry \texttt{burst\_time = -1} and run
+atomically. No preemption occurs. Each task is created, started, and ended in one round.
+The server log shows \texttt{created (-1)}, \texttt{started (-1)}, and \texttt{ended (-1)}
+for each client in sequence.
+
+\textbf{Result:} All three commands executed correctly. Each client received its output
+immediately. The server log confirmed atomic execution with no scheduling interleaving.
+The Gantt summary was printed after the last task completed.
+
+\textit{[Insert screenshot of server and three client terminals here.]}
+
+\subsection{Test Scenario 2 --- One Shell Command and Two Demo Programs}
+
+\textbf{Setup:} Client 1 sent \texttt{pwd} (shell command). Clients 2 and 3 each sent
+\texttt{./demo 12} (program, burst = 12 seconds).
+
+\textbf{Expected behaviour:} The shell command runs first (burst $= -1$). Clients 2 and
+3 then alternate under Round-Robin. In round 1 (quantum = 3\,s): Client 2 runs for 3\,s
+(remaining $= 9$), then Client 3 runs for 3\,s (remaining $= 9$). In round 2+
+(quantum = 7\,s): Client 2 runs for 7\,s (remaining $= 2$), Client 3 runs for 7\,s
+(remaining $= 2$). Both then run their final 2-second slice to completion. The
+no-consecutive rule alternates the two tasks even though their remaining times are equal
+(FCFS tie-breaking applies).
+
+\textbf{Result:} The server log showed the correct \texttt{waiting} and \texttt{running}
+state transitions for both demo processes. Clients 2 and 3 each received the full
+\texttt{Demo 0/12} through \texttt{Demo 12/12} output. The Gantt summary matched the
+expected pattern:
+\texttt{0)-P1-(t)-P2-(t)-P3-(t)-P2-(t)-P3-(t)-P2-(t)-P3-(t)}.
+
+\textit{[Insert screenshot of server and three client terminals here.]}
+
+\subsection{Test Scenario 3 --- Three Demo Programs with Different Burst Times}
+
+\textbf{Setup:} Client 1 sent \texttt{./demo 12} (burst = 12), Client 2 sent
+\texttt{./demo 10} (burst = 10), Client 3 sent \texttt{./demo 8} (burst = 8), each
+started shortly after the previous.
+
+\textbf{Expected behaviour:} SRJF preemption drives the scheduling. When Client 2
+arrives and the remaining time of Client 1 exceeds 10, Client 1 is preempted and Client
+2 starts. When Client 3 arrives with burst = 8 $<$ Client 2's remaining time, Client 2
+is preempted and Client 3 starts. After each quantum, the scheduler re-applies SRJF to
+select the shortest remaining task, with the no-consecutive rule ensuring fairness.
+Client 3 (shortest) finishes first, then Client 2, then Client 1.
+
+\textbf{Result:} Preemption is visible in the server log through the \texttt{waiting}
+state transitions: when a new shorter task arrives, the running task's log line switches
+from \texttt{started}/\texttt{running} to \texttt{waiting (remaining)}, and the new
+task's \texttt{started} line appears immediately after. All three clients received
+complete output (Client 1: lines 0--12, Client 2: lines 0--10, Client 3: lines 0--8).
+The Gantt summary demonstrated the SRJF ordering clearly, with Client 3 finishing first,
+followed by Client 2, then Client 1.
+
+\textit{[Insert screenshot of server and three client terminals here.]}
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{Challenges}
+% ═════════════════════════════════════════════════════════════════════════════
+
+\textbf{Preempting a running child process without losing its state.}
+The most significant challenge was implementing preemption for program tasks. Since the
+child process runs independently, stopping it mid-execution required \texttt{SIGSTOP} and
+resuming required \texttt{SIGCONT}. The key insight was that the OS preserves the entire
+process state (stack, registers, file descriptors, loop variable) across a
+SIGSTOP/SIGCONT cycle, so the child resumes exactly where it stopped with no special
+handling required inside the child itself.
+
+\textbf{Keeping the output pipe open across multiple slices.}
+The pipe between the scheduler and the child process had to remain open for the full
+lifetime of the child, which could span several SIGSTOP/SIGCONT cycles. Closing the
+write end in the parent before the first fork was sufficient; the read end was kept in the
+\texttt{Task} struct and only closed after the child exited and all output was drained.
+
+\textbf{Detecting completion at the quantum boundary.}
+The polling loop exits when \texttt{elapsed >= quantum}, but if the child process exits
+at exactly the same moment, \texttt{waitpid(WNOHANG)} is not called again and the
+completion is missed. An additional \texttt{waitpid} call was added immediately after the
+loop exits to catch this edge case and avoid an unnecessary extra scheduling round.
+
+\textbf{Preemption notification from client thread to scheduler thread.}
+Client threads call \texttt{scheduler\_add\_task()} while the scheduler thread may be
+sleeping inside \texttt{run\_program\_slice()}. A simple \texttt{preempt\_flag} field in
+the queue, read every 200\,ms by the polling loop, was sufficient. More complex mechanisms
+such as signals sent to the scheduler thread were considered but rejected as they would
+have complicated signal mask management across threads.
+
+\textbf{Sending results on the correct socket.}
+In Phase 3, each client thread was responsible for its own socket. In Phase 4, the
+scheduler thread sends results directly to client sockets. This required storing
+\texttt{client\_fd} in the \texttt{Task} struct and carefully clearing the pipe file
+descriptor in the task slot before releasing the mutex, to avoid a double-close if the
+client disconnected concurrently.
+
+\textbf{Avoiding a tight spin when the queue is empty.}
+Early versions of the scheduler polled the queue in a busy loop. Replacing the loop with
+\texttt{pthread\_cond\_wait()} on \texttt{has\_task} eliminated the CPU waste; client
+threads signal the condition variable via \texttt{pthread\_cond\_signal()} in
+\texttt{scheduler\_add\_task()}.
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{Division of Tasks}
+% ═════════════════════════════════════════════════════════════════════════════
+
+Development responsibilities were divided to match each team member's strengths and focus
+areas for this phase.
+
+\textbf{Bernard Gharbin (bg2696)} was primarily responsible for the design and
+implementation of \texttt{scheduler.c} and \texttt{scheduler.h}. This included: the
+definition of all data structures (\texttt{Task}, \texttt{TaskQueue}, \texttt{HistEntry},
+\texttt{TaskState}); the core scheduling loop in \texttt{scheduler\_run()}; the SRJF
+task selection algorithm in \texttt{select\_next\_task()} including the no-consecutive
+rule and FCFS tie-breaking; the preemption mechanism using \texttt{SIGSTOP} and
+\texttt{SIGCONT}; the output pipe management across multiple scheduling slices in
+\texttt{fork\_program()} and \texttt{run\_program\_slice()}; the Gantt-chart history
+recording and summary printing; and the client-disconnect cleanup logic in
+\texttt{scheduler\_remove\_client()}.
+
+\textbf{Bismark Buernortey Buer (bb3621)} was primarily responsible for
+\texttt{demo.c}, the modifications to \texttt{server.c} and \texttt{client.c}, and the
+updated \texttt{Makefile}. This included: implementing the \texttt{demo.c} simulation
+program with correct per-second output and flush behaviour; adding the
+``\texttt{Connected to a server}'' message to \texttt{client.c}; adding
+\texttt{classify\_command()} to the server to distinguish shell commands from programs
+and extract burst times; integrating \texttt{scheduler\_add\_task()} and
+\texttt{scheduler\_remove\_client()} into the client thread lifecycle; spawning and
+detaching the scheduler thread at server startup; updating the \texttt{Makefile} to add
+the \texttt{demo} target and link \texttt{scheduler.o} into the server binary; and
+conducting all three required test scenarios on the remote Linux server, capturing output
+and screenshots, and authoring this report.
+
+Both team members collaborated on integration testing across multiple terminal windows,
+debugging timing issues in the polling loop, and reviewing all scheduling decisions
+against the project specification. As in previous phases, the project was developed using
+GitHub with a structured branching workflow; each member worked in a separate feature
+branch and submitted pull requests for review before merging into the main branch.
+
+% ═════════════════════════════════════════════════════════════════════════════
+\section{References}
+% ═════════════════════════════════════════════════════════════════════════════
+
+\begin{enumerate}
+    \item Linux manual pages for \texttt{pthread\_create}, \texttt{pthread\_mutex\_lock},
+          \texttt{pthread\_cond\_wait}, \texttt{pthread\_cond\_signal},
+          \texttt{sem\_open}, \texttt{sem\_wait}, \texttt{sem\_post},
+          \texttt{fork}, \texttt{pipe}, \texttt{dup2}, \texttt{waitpid},
+          \texttt{kill}, \texttt{SIGSTOP}, \texttt{SIGCONT}, \texttt{nanosleep},
+          and \texttt{execvp} were referenced throughout development.
+
+    \item The Phase 1, 2, and 3 implementations (\texttt{parse.c}, \texttt{execute.c},
+          \texttt{shell.c}, \texttt{server.c}, \texttt{client.c}) served as the
+          cumulative foundation for Phase 4, with all modules reused unchanged unless
+          otherwise noted.
+
+    \item Course lecture materials and laboratory examples on CPU scheduling algorithms
+          --- including Round-Robin, Shortest-Job-First, and preemptive scheduling ---
+          were consulted to inform the combined SRJF + RR design and the choice of
+          quantum values.
+\end{enumerate}
+
+\end{document}

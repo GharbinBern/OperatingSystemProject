@@ -1,42 +1,30 @@
 #include "input.h"
-#include <stdio.h> // for fgets, stdin
-#include <stdlib.h> //for malloc, NULL
-#include <string.h> //for strlen, strcpy
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-
-/*
- * Reads a line of input from the user (stdin), removes the trailing newline, and returns
- * a dynamically allocated string. Handles EOF (Ctrl+D) by returning NULL.
- *
- * Main logic steps:
- *   1. Read a line from stdin into a fixed-size buffer using fgets().
- *   2. If EOF is reached, return NULL.
- *   3. Remove the trailing newline character, if present.
- *   4. Allocate memory for the input string and copy the buffer.
- *   5. Return the dynamically allocated string (caller must free).
- */
+// Reads one line from stdin into a fixed buffer, strips the trailing newline,
+// and returns a heap-allocated copy. Returns NULL on EOF (Ctrl+D).
+// Caller is responsible for freeing the returned string.
 char *read_input(void) {
-    char buffer[MAX_INPUT_SIZE];
+    char buffer[MAX_INPUT_SIZE];  // temporary storage for the raw input line
 
-    // Read from stdin using fgets
-    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
-        // EOF reached
+    // read one line; returns NULL when stdin reaches EOF
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL)
         return NULL;
-    }
 
-    // Remove trailing newline for easy comparison and parsing
+    // remove the trailing '\n' that fgets leaves in the buffer
     size_t len = strlen(buffer);
-    if (len > 0 && buffer[len - 1] == '\n') {
+    if (len > 0 && buffer[len - 1] == '\n')
         buffer[len - 1] = '\0';
-    }
 
-    // Allocate memory for the input and copy it
+    // allocate exactly enough space for the line plus the null terminator
     char *input = malloc(strlen(buffer) + 1);
     if (input == NULL) {
         perror("malloc");
         return NULL;
     }
-    strcpy(input, buffer);
 
+    strcpy(input, buffer);  // copy from stack buffer to heap
     return input;
 }
