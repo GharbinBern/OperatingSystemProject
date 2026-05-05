@@ -21,6 +21,7 @@
 #include <time.h>
 #include <errno.h>
 #include <limits.h>
+#include <fcntl.h>
 
 // forward declarations for internal helpers
 static int  select_next_task(TaskQueue *q);
@@ -28,7 +29,7 @@ static void record_history(TaskQueue *q, int client_num);
 static void run_shell_task(TaskQueue *q, int idx);
 static int  run_program_slice(TaskQueue *q, int idx);
 static int  fork_program(Task *t);
-static void send_program_output(int client_num, int client_fd, int pipe_read);
+static void send_program_output(int client_num, int client_fd, int pipe_read, int bytes_already_sent);
 
 
 // Zero-initialises every slot, sets up the mutex and condvar, records start time.
@@ -38,7 +39,7 @@ void scheduler_init(TaskQueue *q) {
     q->next_task_id     = 1;           // IDs are 1-based; 0 means empty
     q->last_run_task_id = -1;          // no task has run yet
     q->preempt_flag     = 0;
-    q->start_time       = time(NULL);  // used for relative Gantt timestamps
+    clock_gettime(CLOCK_MONOTONIC, &q->start_time);
     q->hist_head        = NULL;
     q->hist_tail        = NULL;
     pthread_mutex_init(&q->mutex, NULL);
@@ -81,6 +82,7 @@ int scheduler_add_task(TaskQueue *q, int client_num, int client_fd,
     t->pid            = -1;          // no child forked yet
     t->pipe_read      = -1;          // no pipe open yet
     t->cancelled      = 0;
+    t->bytes_sent     = 0;
     q->count++;
 
     printf("[%d]--- created (%d)\n", client_num, burst_time);
@@ -133,11 +135,27 @@ void scheduler_remove_client(TaskQueue *q, int client_num) {
 // Called automatically whenever the queue drains to zero active tasks.
 void scheduler_print_summary(TaskQueue *q) {
     pthread_mutex_lock(&q->mutex);
-    printf("0)");
-    for (HistEntry *e = q->hist_head; e != NULL; e = e->next)
-        printf("-P%d-(%ld)", e->client_num, e->end_time);
-    printf("\n");
-    fflush(stdout);
+
+    // a single-task run produces no useful scheduling information, so only
+    // print the Gantt chart when two or more tasks have been recorded
+    if (q->hist_head != NULL && q->hist_head != q->hist_tail) {
+        printf("0)");
+        for (HistEntry *e = q->hist_head; e != NULL; e = e->next)
+            printf("-P%d-(%ld)", e->client_num, e->end_time);
+        printf("\n");
+        fflush(stdout);
+    }
+
+    // free the history and reset state so the next batch of tasks starts clean:
+    // last_run_task_id = -1 re-triggers the start_time anchor on the next first task,
+    // and an empty history list prevents old entries appearing in the next summary
+    HistEntry *e = q->hist_head;
+    while (e) { HistEntry *next = e->next; free(e); e = next; }
+    q->hist_head        = NULL;
+    q->hist_tail        = NULL;
+    q->hist_last_ns     = 0;
+    q->last_run_task_id = -1;
+
     pthread_mutex_unlock(&q->mutex);
 }
 
@@ -171,9 +189,6 @@ void scheduler_cleanup(TaskQueue *q) {
 void *scheduler_run(void *arg) {
     TaskQueue *q = (TaskQueue *)arg;
 
-    printf("[SCHEDULER] Scheduler thread started\n");
-    fflush(stdout);
-
     while (1) {
         pthread_mutex_lock(&q->mutex);
 
@@ -192,6 +207,11 @@ void *scheduler_run(void *arg) {
         Task *t  = &q->tasks[idx];
         t->state = TASK_RUNNING;
         q->preempt_flag = 0;  // clear any stale preemption request before running
+
+        // anchor the Gantt clock to when the very first task starts executing,
+        // not to when the server launched (avoids inflated idle-time offsets)
+        if (q->last_run_task_id == -1)
+            clock_gettime(CLOCK_MONOTONIC, &q->start_time);
 
         pthread_mutex_unlock(&q->mutex);
 
@@ -226,20 +246,21 @@ void *scheduler_run(void *arg) {
                 q->count--;
 
             } else if (completed) {
-                // task finished: send its accumulated output then reclaim slot
-                printf("[%d]--- ended (0)\n", t->client_num);
-                fflush(stdout);
+                // task finished: send output first, then log ended
                 // copy fields we need before releasing the mutex (t may be reused after unlock)
-                int cfd  = t->client_fd;
-                int cnum = t->client_num;
-                int pfd  = t->pipe_read;
+                int cfd   = t->client_fd;
+                int cnum  = t->client_num;
+                int pfd   = t->pipe_read;
+                int bsent = t->bytes_sent;  // bytes already forwarded during polling
                 t->pipe_read = -1;
                 t->task_id   = 0;
                 q->count--;
                 int empty = (q->count == 0);
                 pthread_mutex_unlock(&q->mutex);  // unlock before doing I/O
 
-                send_program_output(cnum, cfd, pfd);
+                send_program_output(cnum, cfd, pfd, bsent);
+                printf("[%d]--- ended (0)\n", cnum);
+                fflush(stdout);
                 if (empty) scheduler_print_summary(q);
                 continue;  // already unlocked above; skip the unlock at the bottom
 
@@ -305,10 +326,33 @@ static void record_history(TaskQueue *q, int client_num) {
     HistEntry *e = malloc(sizeof(HistEntry));
     if (!e) return;
     e->client_num = client_num;
-    e->end_time   = (long)(time(NULL) - q->start_time);  // relative timestamp
-    e->next       = NULL;
-    if (q->hist_tail) q->hist_tail->next = e;  // append to tail
-    else              q->hist_head       = e;   // first entry
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long now_ns = now.tv_sec * 1000000000L + now.tv_nsec;
+
+    long end_time;
+    if (q->hist_tail == NULL) {
+        // first slice: compute elapsed from the scheduling start anchor
+        long start_ns = q->start_time.tv_sec * 1000000000L + q->start_time.tv_nsec;
+        long elapsed_ns = now_ns - start_ns;
+        end_time = (elapsed_ns + 500000000L) / 1000000000L;
+        if (end_time < 1) end_time = 1;
+    } else {
+        // subsequent slices: use the delta from the previous entry's timestamp so
+        // that a 7-second quantum always contributes exactly 7 to the Gantt,
+        // regardless of sub-second rounding at the slice boundary
+        long delta_ns = now_ns - q->hist_last_ns;
+        long delta_s  = (delta_ns + 500000000L) / 1000000000L;
+        if (delta_s < 1) delta_s = 1;  // always advance by at least 1 second
+        end_time = q->hist_tail->end_time + delta_s;
+    }
+    q->hist_last_ns = now_ns;
+
+    e->end_time = end_time;
+    e->next = NULL;
+    if (q->hist_tail) q->hist_tail->next = e;
+    else              q->hist_head       = e;
     q->hist_tail = e;
 }
 
@@ -339,6 +383,7 @@ static void run_shell_task(TaskQueue *q, int idx) {
     }
 
     free(output);
+    send(t->client_fd, "\x04", 1, 0);  // end-of-response marker; client reads until this
     printf("[%d]--- ended (-1)\n", t->client_num);
     fflush(stdout);
 }
@@ -388,6 +433,12 @@ static int fork_program(Task *t) {
     close(pipefd[1]);
     t->pipe_read = pipefd[0];  // save read end; stays open through SIGSTOP/SIGCONT
     t->pid       = pid;
+
+    // non-blocking reads allow the polling loop to drain available output each
+    // tick without stalling when the child hasn't written anything yet
+    int fl = fcntl(pipefd[0], F_GETFL, 0);
+    fcntl(pipefd[0], F_SETFL, fl | O_NONBLOCK);
+
     return 0;
 }
 
@@ -412,25 +463,41 @@ static int run_program_slice(TaskQueue *q, int idx) {
     }
     fflush(stdout);
 
-    time_t slice_start = time(NULL);
-    int    elapsed     = 0;
-    int    completed   = 0;
+    struct timespec ts_start, ts_now;
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+    long elapsed_ms = 0;
+    int  completed  = 0;
 
     // polling loop: wake every SCH_POLL_MS ms and check for exit or preemption
-    while (elapsed < quantum) {
-        struct timespec ts = { 0, (long)SCH_POLL_MS * 1000000L };
-        nanosleep(&ts, NULL);
-        elapsed = (int)(time(NULL) - slice_start);
+    while (elapsed_ms < (long)quantum * 1000) {
+        struct timespec ts_sleep = { 0, (long)SCH_POLL_MS * 1000000L };
+        nanosleep(&ts_sleep, NULL);
+
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        elapsed_ms = (ts_now.tv_sec  - ts_start.tv_sec)  * 1000
+                   + (ts_now.tv_nsec - ts_start.tv_nsec) / 1000000;
 
         // check whether the child has already exited
         int   status;
         pid_t r = waitpid(t->pid, &status, WNOHANG);
         if (r == t->pid) { completed = 1; t->pid = -1; break; }
 
-        // check whether a client thread requested preemption
+        // forward any output the child has written since the last poll;
+        // non-blocking read returns EAGAIN immediately when nothing is ready
         pthread_mutex_lock(&q->mutex);
-        int preempt = q->preempt_flag;
+        int preempt   = q->preempt_flag;
+        int cancelled = t->cancelled;
         pthread_mutex_unlock(&q->mutex);
+
+        if (!cancelled) {
+            char fwd[4096];
+            ssize_t nr;
+            while ((nr = read(t->pipe_read, fwd, sizeof(fwd))) > 0) {
+                ssize_t sent = send(t->client_fd, fwd, (size_t)nr, 0);
+                if (sent > 0) t->bytes_sent += (int)sent;
+            }
+        }
+
         if (preempt) { kill(t->pid, SIGSTOP); break; }  // stop child; scheduler will reschedule
     }
 
@@ -451,35 +518,60 @@ static int run_program_slice(TaskQueue *q, int idx) {
         if (!preempt) kill(t->pid, SIGSTOP);  // preempt path already stopped it in the loop
     }
 
-    // update remaining time by actual seconds used this slice
+    // final elapsed measurement after the child is stopped or has exited;
+    // round to nearest second so integer truncation doesn't accumulate across slices
+    clock_gettime(CLOCK_MONOTONIC, &ts_now);
+    elapsed_ms = (ts_now.tv_sec  - ts_start.tv_sec)  * 1000
+               + (ts_now.tv_nsec - ts_start.tv_nsec) / 1000000;
+    int elapsed = (int)((elapsed_ms + 500) / 1000);  // round to nearest second
+
     t->remaining_time -= elapsed;
     if (t->remaining_time < 0) t->remaining_time = 0;
+
+    // if the predicted burst is exhausted but the child is still alive (stopped),
+    // resume it and block until it exits — avoids re-queuing with remaining=0
+    // which would produce a misleading "running (0)" log line
+    if (!completed && t->remaining_time == 0 && t->pid > 0) {
+        kill(t->pid, SIGCONT);
+        waitpid(t->pid, NULL, 0);
+        completed = 1;
+        t->pid = -1;
+    }
 
     return completed;
 }
 
 
-// Reads all accumulated output from the child's pipe and forwards it to the
-// client socket. Closes the pipe when done.
+// Drains any output remaining in the pipe after the child exits and forwards it
+// to the client socket. bytes_already_sent is the total forwarded during polling;
+// this function adds whatever is left and logs the combined total.
 // Called without q->mutex held to avoid holding the lock during blocking I/O.
-static void send_program_output(int client_num, int client_fd, int pipe_read) {
-    char    buf[65536];  // large buffer; programs are expected to produce modest output
+static void send_program_output(int client_num, int client_fd, int pipe_read,
+                                int bytes_already_sent) {
+    char    buf[65536];
     int     total = 0;
     ssize_t n;
 
-    // read until EOF (child exited, so the write end of the pipe is closed)
+    // pipe read end is non-blocking; with the write end closed (child exited)
+    // read() returns 0 (EOF) once all data is consumed, so this loop terminates
     while (total < (int)(sizeof(buf) - 1) &&
            (n = read(pipe_read, buf + total, sizeof(buf) - (size_t)total - 1)) > 0)
         total += (int)n;
 
     buf[total] = '\0';
-    close(pipe_read);  // done reading; release the fd
+    close(pipe_read);
 
+    int grand_total = bytes_already_sent;
     if (total > 0) {
         ssize_t sent = send(client_fd, buf, (size_t)total, 0);
-        printf("[%d]<<< %zd bytes sent\n", client_num, sent);
-    } else {
-        send(client_fd, "\n", 1, 0);  // send a blank line so the client isn't left waiting
+        if (sent > 0) grand_total += (int)sent;
+    } else if (bytes_already_sent == 0) {
+        // program produced no output at all; send a blank line so the client
+        // does not block forever waiting for a response
+        send(client_fd, "\n", 1, 0);
     }
+
+    send(client_fd, "\x04", 1, 0);  // end-of-response marker; client reads until this
+    printf("[%d]<<< %d bytes sent\n", client_num, grand_total);
     fflush(stdout);
 }

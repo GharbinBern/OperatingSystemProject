@@ -21,9 +21,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Print iteration i, sleep 1 second, repeat until i == n.
-    // Total wall-clock time = n seconds, matching the burst time value.
-    // fflush ensures each line reaches the pipe immediately.
     for (int i = 0; i <= n; i++) {
         printf("Demo %d/%d\n", i, n);
         fflush(stdout);

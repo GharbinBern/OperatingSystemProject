@@ -43,6 +43,7 @@ typedef struct {
     pid_t      pid;                   // child PID; -1 if not forked yet
     int        pipe_read;             // read end of the output-capture pipe
     int        cancelled;             // set to 1 when the client disconnects
+    int        bytes_sent;           // total bytes forwarded to the client across all slices
 } Task;
 
 // one entry in the Gantt-chart history linked list
@@ -63,7 +64,8 @@ typedef struct {
     int             last_run_task_id; // ID of most recently run task (-1 = none)
     int             preempt_flag;     // set by client thread to request preemption
 
-    time_t          start_time;       // epoch time at scheduler_init()
+    struct timespec start_time;       // monotonic clock at first task dispatch
+    long            hist_last_ns;     // monotonic ns when the last HistEntry was recorded
     HistEntry      *hist_head;
     HistEntry      *hist_tail;
 } TaskQueue;

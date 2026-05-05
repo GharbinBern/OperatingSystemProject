@@ -1,8 +1,14 @@
 // client.c
 // TCP client for the multithreaded shell server.
 // Connects to the server, sends commands entered by the user, and prints responses.
+//
+// The server terminates every command's output with an EOT byte (0x04).
+// The client loops on recv() until it receives that marker so that iterative
+// program output (one line per second from demo.c) is displayed as it arrives
+// rather than all at once at the end.
+//
 // Typing "exit" sends the command to the server first so it can log the disconnect,
-// then waits for the server to close the connection before printing "Disconnected from server."
+// then waits for the server to close the connection before printing "Disconnected."
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,33 +21,30 @@
 
 #define PORT        3000   // Must match the PORT value in server.c
 #define BUFFER_SIZE 4096   // Size of the send and receive buffers
+#define EOT         '\x04' // End-of-response marker sent by server after each command
 
 int main(void) {
     int sock;
     struct sockaddr_in serv_addr;
-    char send_buf[BUFFER_SIZE];  // Holds the command entered by the user
-    char recv_buf[BUFFER_SIZE];  // Holds the response received from the server
-    int  bytes;                  // Return value of recv(), reused throughout
+    char send_buf[BUFFER_SIZE];
+    char recv_buf[BUFFER_SIZE];
+    int  bytes;
 
-    // Create the TCP socket. AF_INET = IPv4, SOCK_STREAM = TCP.
+    // Create the TCP socket.
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    // Set up the server address to connect to.
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port   = htons(PORT);
 
-    // inet_pton() converts the dotted-decimal string to binary form.
-    // Returns 1 on success, 0 if the address is invalid, -1 on error.
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
         perror("inet_pton failed: invalid server address");
         close(sock);
         exit(EXIT_FAILURE);
     }
 
-    // Initiate the TCP connection to the server.
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         perror("connect failed: server may not be running");
         close(sock);
@@ -51,41 +54,33 @@ int main(void) {
     printf("Connected to a server\n");
     fflush(stdout);
 
-    // Prompt loop: runs until "exit", EOF, or a socket error.
     while (1) {
-        // Print the prompt and flush so it appears before the user types.
         printf("$ ");
         fflush(stdout);
 
-        // fgets() reads a line from stdin. Returns NULL on EOF (Ctrl-D).
         if (fgets(send_buf, BUFFER_SIZE, stdin) == NULL) {
             printf("\n");
             break;
         }
 
-        // Strip the trailing newline so the server receives a clean string.
+        // Strip trailing newline.
         size_t len = strlen(send_buf);
         if (len > 0 && send_buf[len - 1] == '\n')
             send_buf[--len] = '\0';
 
-        // Ignore blank lines and just show the prompt again.
         if (len == 0)
             continue;
 
-        // Ignore ANSI escape sequences from arrow keys since there is no
-        // readline support and sending them to the server causes errors.
+        // Ignore ANSI escape sequences from arrow keys.
         if (strchr(send_buf, '\033') != NULL)
             continue;
 
-        // Send the command to the server.
         if (send(sock, send_buf, len, 0) < 0) {
             perror("send failed");
             break;
         }
 
-        // If the command is "exit", wait for the server to close the socket,
-        // then print the disconnect message and exit.
-        // "exit" was already sent above so the server can log the disconnect.
+        // "exit": send to server for logging, then wait for it to close the socket.
         if (strcmp(send_buf, "exit") == 0) {
             bytes = recv(sock, recv_buf, BUFFER_SIZE - 1, 0);
             if (bytes < 0)
@@ -94,25 +89,49 @@ int main(void) {
             break;
         }
 
-        // Receive the server's response.
-        // recv() returns 0 if the server closed the connection, -1 on error.
-        bytes = recv(sock, recv_buf, BUFFER_SIZE - 1, 0);
-        if (bytes <= 0) {
-            if (bytes == 0)
-                printf("Server disconnected.\n");
-            else
-                perror("recv failed");
-            break;
+        // Receive the server's response, looping until the EOT marker (0x04) arrives.
+        // The server sends EOT after every command's complete output, whether the command
+        // ran atomically (shell) or iteratively (program like demo).
+        int server_closed = 0;
+        while (1) {
+            bytes = recv(sock, recv_buf, BUFFER_SIZE - 1, 0);
+            if (bytes <= 0) {
+                if (bytes == 0)
+                    printf("Server disconnected.\n");
+                else
+                    perror("recv failed");
+                server_closed = 1;
+                break;
+            }
+
+            // Scan for the EOT marker.
+            int eot = -1;
+            for (int i = 0; i < bytes; i++) {
+                if ((unsigned char)recv_buf[i] == (unsigned char)EOT) {
+                    eot = i;
+                    break;
+                }
+            }
+
+            if (eot >= 0) {
+                // Print everything before the EOT marker, then stop.
+                if (eot > 0) {
+                    recv_buf[eot] = '\0';
+                    printf("%s", recv_buf);
+                    if (recv_buf[eot - 1] != '\n')
+                        printf("\n");
+                }
+                break;
+            } else {
+                // Intermediate chunk: print and keep receiving.
+                recv_buf[bytes] = '\0';
+                printf("%s", recv_buf);
+                fflush(stdout);
+            }
         }
 
-        // Null-terminate before printing so printf treats it as a string.
-        recv_buf[bytes] = '\0';
-        printf("%s", recv_buf);
-
-        // If the output does not end with a newline, add one so the next
-        // prompt appears on a clean line.
-        if (recv_buf[bytes - 1] != '\n')
-            printf("\n");
+        if (server_closed)
+            break;
     }
 
     close(sock);

@@ -19,6 +19,8 @@
 #include <semaphore.h>
 #include <fcntl.h>
 
+#include <signal.h>
+
 #include "shell.h"
 #include "scheduler.h"
 
@@ -116,6 +118,7 @@ static void *ThreadFunction(void *arg) {
             // queue full: send error immediately so the client isn't left hanging
             const char *err = "Error: Server task queue is full. Try again later.\n";
             send(client_fd, err, strlen(err), 0);
+            send(client_fd, "\x04", 1, 0);
         }
         // the client thread does NOT wait for the result here;
         // client.c is synchronous so recv() above naturally blocks until
@@ -134,6 +137,10 @@ static void *ThreadFunction(void *arg) {
 
 
 int main(void) {
+    // ignore SIGPIPE so a send() on a disconnected client socket returns EPIPE
+    // instead of terminating the server process
+    signal(SIGPIPE, SIG_IGN);
+
     // create a named semaphore (value=1) to protect client_counter
     sem_unlink(CLIENT_SEM_NAME);  // remove stale instance from a previous run
     client_sem = sem_open(CLIENT_SEM_NAME, O_CREAT | O_EXCL, 0600, 1);
