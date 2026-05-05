@@ -289,7 +289,7 @@ static char *next_token_quoted(const char **cursor, int *unmatched_quote) {
             if (*ptr == '\\') {
                 char next = *(ptr + 1);
                 if (next == '"' || next == '\\') {
-                    token[out_idx++] = next; ptr += 2;         // collapse \" and \\
+                    token[out_idx++] = next; ptr += 2;         // collapse backslash-quote and double-backslash
                 } else if (next != '\0') {
                     token[out_idx++] = *ptr; token[out_idx++] = next; ptr += 2;
                 } else {
